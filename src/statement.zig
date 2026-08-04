@@ -34,8 +34,11 @@ pub fn execute(
     stdout: anytype,
     io: std.Io,
 ) errors.EllochkaError!ExecResult {
-    const toks = tokenizeLine(allocator, line) catch return errors.ParseError.InvalidStatement;
-    defer allocator.free(toks);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const toks = tokenizeLine(a, line) catch return errors.ParseError.InvalidStatement;
     if (toks.len == 0) return .next;
 
     const first = toks[0];
@@ -60,13 +63,13 @@ pub fn execute(
     if (eq(name, "ORDN")) { st.ordinate_direction = .down; return .next; }
 
     if (eq(name, "GOTO")) {
-        return execGoto(toks[1..], st, prog);
+        return execGoto(a, toks[1..], st, prog);
     }
     if (eq(name, "ESLI")) {
-        return execEsli(allocator, toks[1..], st, prog);
+        return execEsli(a, toks[1..], st, prog);
     }
     if (eq(name, "SLEP")) {
-        var parser = expr_mod.Parser.init(allocator, toks[1..]);
+        var parser = expr_mod.Parser.init(a, toks[1..]);
         const node = try parser.parseExpr();
         const ms = try expr_mod.evaluate(node, st, .{});
         io.sleep(.fromMilliseconds(@as(i64, @intFromFloat(ms))), .awake) catch {};
@@ -81,17 +84,17 @@ pub fn execute(
         return .next;
     }
     if (eq(name, "CFON") or eq(name, "CSIM") or eq(name, "STRO") or eq(name, "STLB")) {
-        return execAnsiControl(allocator, name, toks[1..], st, stdout);
+        return execAnsiControl(a, name, toks[1..], st, stdout);
     }
     if (eq(name, "LIST")) {
-        return execList(allocator, toks[1..], st, stdout);
+        return execList(a, toks[1..], st, stdout);
     }
     if (eq(name, "VVOD")) {
-        return execVvod(allocator, toks[1..], st, stdout, io);
+        return execVvod(a, toks[1..], st, stdout, io);
     }
 
     if (name.len == 1 and InterpreterState.letterIndex(name[0]) != null) {
-        return execAssignment(allocator, toks, st);
+        return execAssignment(a, toks, st);
     }
     if (first.kind == .dollar) {
         return errors.ParseError.ExtensionNotImplemented;
@@ -105,6 +108,7 @@ fn eq(a: []const u8, b: []const u8) bool {
 }
 
 fn execGoto(
+    allocator: std.mem.Allocator,
     args: []lexer.Token,
     st: *InterpreterState,
     prog: *const Program,
@@ -114,7 +118,7 @@ fn execGoto(
         const target = prog.resolveLabel(args[1].text) orelse return errors.RuntimeError.LabelNotFound;
         return .{ .jump = target };
     }
-    var parser = expr_mod.Parser.init(std.heap.page_allocator, args);
+    var parser = expr_mod.Parser.init(allocator, args);
     const node = try parser.parseExpr();
     const val = try expr_mod.evaluate(node, st, .{});
     const relative = parser.pos < args.len and args[parser.pos].kind == .backslash;
@@ -169,7 +173,7 @@ fn execEsli(
     };
 
     if (!cond_true) return .next;
-    return execGoto(goto_tokens, st, prog);
+    return execGoto(allocator, goto_tokens, st, prog);
 }
 
 fn execAnsiControl(
@@ -232,6 +236,12 @@ fn printSegment(
         stdout.print("{s}", .{segment[0].text}) catch {};
         return;
     }
+    if (segment.len == 2 and segment[0].kind == .dollar and segment[1].kind == .number) {
+        const idx = std.fmt.parseInt(usize, segment[1].text, 10) catch return errors.ParseError.InvalidVariableName;
+        if (idx >= 10) return errors.ParseError.InvalidVariableName;
+        stdout.print("{s}", .{st.dynamic_strings[idx].data}) catch {};
+        return;
+    }
     var parser = expr_mod.Parser.init(allocator, segment);
     const node = try parser.parseExpr();
     const val = try expr_mod.evaluate(node, st, .{});
@@ -281,6 +291,16 @@ fn readSegment(
         if (trimmed.len > 0) {
             st.scalars[letter] = std.fmt.parseFloat(f32, trimmed) catch return errors.ParseError.InvalidNumber;
         }
+        return;
+    }
+    if (segment.len == 2 and segment[0].kind == .dollar and segment[1].kind == .number) {
+        const idx = std.fmt.parseInt(usize, segment[1].text, 10) catch return errors.ParseError.InvalidVariableName;
+        if (idx >= 10) return errors.ParseError.InvalidVariableName;
+        var buf: [1024]u8 = undefined;
+        var stdin_reader: std.Io.File.Reader = .init(.stdin(), io, &buf);
+        const line = stdin_reader.interface.takeDelimiterExclusive('\n') catch "";
+        const trimmed = std.mem.trimEnd(u8, line, "\r");
+        st.dynamic_strings[idx].set(st.allocator, trimmed) catch return errors.RuntimeError.StringIndexOutOfBounds;
         return;
     }
     return errors.ParseError.ExtensionNotImplemented;

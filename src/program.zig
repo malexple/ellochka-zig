@@ -23,8 +23,12 @@ pub const Program = struct {
     owned_source: []u8,
 
     pub fn deinit(self: *Program) void {
-        self.lines.deinit(self.allocator);
+        var it = self.labels.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
         self.labels.deinit(self.allocator);
+        self.lines.deinit(self.allocator);
         self.allocator.free(self.owned_source);
     }
 
