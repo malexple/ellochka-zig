@@ -1,0 +1,55 @@
+! Тест SIZE/UMEM/CURR/INCR/DECR
+CLSC
+CSIM 2
+LIST 'ТЕСТ SIZE/UMEM/CURR/INCR/DECR'
+CSIM 7
+LIST ''
+
+! SIZE для одномерного массива
+SIZE [5]=A
+A[]=?*10
+LIST 'Массив A размером 5, A[]=?*10:'
+I=1
+@loop1
+LIST 'A['; I; ']='; A[I]
+INCR I
+ESLI I <= 5; @loop1
+LIST ''
+
+! CURR для 1D
+CURR 1K
+LIST 'CURR 1K (размер 1D массивов) = '; K
+LIST ''
+
+! SIZE для двумерного массива
+SIZE [2,3]=M
+M[,]=?1*10+?2
+LIST 'Массив M размером 2x3, M[,]=?1*10+?2:'
+LIST 'M[1,1]='; M[1,1]; ' M[1,2]='; M[1,2]; ' M[1,3]='; M[1,3]
+LIST 'M[2,1]='; M[2,1]; ' M[2,2]='; M[2,2]; ' M[2,3]='; M[2,3]
+LIST ''
+
+! CURR для 2D
+CURR 2K
+LIST 'CURR 2K (число строк 2D) = '; K
+LIST ''
+
+! MEMC для конкретного массива
+MEMC 1A
+LIST 'После MEMC 1A, A[1]='; A[1]
+LIST ''
+
+! DECR
+J=10
+DECR J
+DECR J
+LIST 'J после двух DECR: '; J
+LIST ''
+
+! UMEM
+UMEM 1
+CURR 1K
+LIST 'После UMEM 1, CURR 1K = '; K
+
+CSIM 7
+EXIT

@@ -50,11 +50,22 @@ pub fn execute(
         return .halt;
     }
     if (eq(name, "MEMC")) {
-        if (toks.len == 1) {
-            @memset(&st.scalars, 0.0);
-            return .next;
-        }
-        return errors.ParseError.ExtensionNotImplemented;
+        return execMemc(toks[1..], st);
+    }
+    if (eq(name, "SIZE")) {
+        return execSize(a, toks[1..], st);
+    }
+    if (eq(name, "UMEM")) {
+        return execUmem(a, toks[1..], st);
+    }
+    if (eq(name, "CURR")) {
+        return execCurr(toks[1..], st);
+    }
+    if (eq(name, "INCR")) {
+        return execIncrDecr(toks[1..], st, 1.0);
+    }
+    if (eq(name, "DECR")) {
+        return execIncrDecr(toks[1..], st, -1.0);
     }
 
     if (eq(name, "RADI")) { st.angle_mode = .radians; return .next; }
@@ -105,6 +116,193 @@ pub fn execute(
 
 fn eq(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b);
+}
+
+/// Разбирает токен-число (например, "1", "2", "3") в u8-категорию.
+/// Используется для SIZE/UMEM/CURR/MEMC вида "<цифра><буква>".
+fn parseCategoryDigit(tok: lexer.Token) errors.EllochkaError!u8 {
+    if (tok.kind != .number) return errors.ParseError.InvalidStatement;
+    const val = std.fmt.parseInt(u32, tok.text, 10) catch return errors.ParseError.InvalidStatement;
+    if (val > 255) return errors.ParseError.InvalidStatement;
+    return @intCast(val);
+}
+
+/// INCR A / DECR A — увеличивает/уменьшает простую переменную на 1.
+fn execIncrDecr(
+    args: []lexer.Token,
+    st: *InterpreterState,
+    delta: f32,
+) errors.EllochkaError!ExecResult {
+    if (args.len != 1 or args[0].kind != .identifier or args[0].text.len != 1) {
+        return errors.ParseError.InvalidStatement;
+    }
+    const letter = InterpreterState.letterIndex(args[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
+    st.scalars[letter] += delta;
+    return .next;
+}
+
+/// MEMC            — обнулить простые переменные;
+/// MEMC $$         — очистить все элементы строкового массива;
+/// MEMC 1M         — обнулить все элементы одномерного массива M;
+/// MEMC 2K         — обнулить все элементы двумерного массива K.
+fn execMemc(
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    if (args.len == 0) {
+        @memset(&st.scalars, 0.0);
+        return .next;
+    }
+    if (args.len == 2 and args[0].kind == .dollar and args[1].kind == .dollar) {
+        for (st.static_strings) |*s| @memset(s, 0);
+        @memset(st.static_strings_lens, 0);
+        return .next;
+    }
+    if (args.len == 2 and args[0].kind == .number and args[1].kind == .identifier and args[1].text.len == 1) {
+        const category = try parseCategoryDigit(args[0]);
+        const letter = InterpreterState.letterIndex(args[1].text[0]) orelse return errors.ParseError.InvalidVariableName;
+        switch (category) {
+            1 => {
+                const arr = st.arrays1d[letter];
+                if (arr.len == 0) return errors.RuntimeError.ArrayNotSized;
+                @memset(arr, 0.0);
+            },
+            2 => {
+                const arr = st.arrays2d[letter];
+                if (arr.data.len == 0) return errors.RuntimeError.ArrayNotSized;
+                @memset(arr.data, 0.0);
+            },
+            else => return errors.ParseError.InvalidStatement,
+        }
+        return .next;
+    }
+    return errors.ParseError.ExtensionNotImplemented;
+}
+
+/// SIZE L               — задать размер строкового массива L элементов;
+/// SIZE [K]=A;X;R        — задать размер K для одномерных массивов A,X,R;
+/// SIZE [N,M]=X;Y;W      — задать размер N x M для двумерных массивов X,Y,W.
+fn execSize(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    if (args.len == 0) return errors.ParseError.InvalidStatement;
+
+    if (args[0].kind != .lbracket) {
+        var parser = expr_mod.Parser.init(allocator, args);
+        const node = try parser.parseExpr();
+        const len_f = try expr_mod.evaluate(node, st, .{});
+        const len: usize = @intFromFloat(len_f);
+        st.sizeStringArray(len) catch return errors.RuntimeError.MemoryAllocationFailed;
+        return .next;
+    }
+
+    var idx: usize = 1;
+    var depth: usize = 1;
+    var comma_pos: ?usize = null;
+    while (idx < args.len and depth > 0) {
+        if (args[idx].kind == .lbracket) depth += 1;
+        if (args[idx].kind == .rbracket) { depth -= 1; if (depth == 0) break; }
+        if (args[idx].kind == .comma and depth == 1 and comma_pos == null) comma_pos = idx;
+        idx += 1;
+    }
+    if (idx >= args.len) return errors.ParseError.UnbalancedBrackets;
+    const bracket_end = idx;
+    idx += 1;
+    if (idx >= args.len or args[idx].kind != .equals) return errors.ParseError.InvalidStatement;
+    idx += 1;
+    const var_tokens = args[idx..];
+
+    if (comma_pos) |cp| {
+        const row_tokens = args[1..cp];
+        const col_tokens = args[cp + 1 .. bracket_end];
+        var rp = expr_mod.Parser.init(allocator, row_tokens);
+        const rnode = try rp.parseExpr();
+        const rows_f = try expr_mod.evaluate(rnode, st, .{});
+        var cp2 = expr_mod.Parser.init(allocator, col_tokens);
+        const cnode = try cp2.parseExpr();
+        const cols_f = try expr_mod.evaluate(cnode, st, .{});
+        const rows: usize = @intFromFloat(rows_f);
+        const cols: usize = @intFromFloat(cols_f);
+
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i <= var_tokens.len) {
+            if (i == var_tokens.len or var_tokens[i].kind == .semicolon) {
+                const seg = var_tokens[start..i];
+                if (seg.len == 1 and seg[0].kind == .identifier and seg[0].text.len == 1) {
+                    const letter = InterpreterState.letterIndex(seg[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
+                    st.sizeArray2D(letter, rows, cols) catch return errors.RuntimeError.MemoryAllocationFailed;
+                } else if (seg.len > 0) {
+                    return errors.ParseError.InvalidStatement;
+                }
+                start = i + 1;
+            }
+            i += 1;
+        }
+    } else {
+        const idx_tokens = args[1..bracket_end];
+        var ip = expr_mod.Parser.init(allocator, idx_tokens);
+        const inode = try ip.parseExpr();
+        const len_f = try expr_mod.evaluate(inode, st, .{});
+        const len: usize = @intFromFloat(len_f);
+
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i <= var_tokens.len) {
+            if (i == var_tokens.len or var_tokens[i].kind == .semicolon) {
+                const seg = var_tokens[start..i];
+                if (seg.len == 1 and seg[0].kind == .identifier and seg[0].text.len == 1) {
+                    const letter = InterpreterState.letterIndex(seg[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
+                    st.sizeArray1D(letter, len) catch return errors.RuntimeError.MemoryAllocationFailed;
+                } else if (seg.len > 0) {
+                    return errors.ParseError.InvalidStatement;
+                }
+                start = i + 1;
+            }
+            i += 1;
+        }
+    }
+    return .next;
+}
+
+/// UMEM D — уничтожить все одномерные (D=1), двумерные (D=2)
+/// или строковый (D=3) массивы.
+fn execUmem(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    var parser = expr_mod.Parser.init(allocator, args);
+    const node = try parser.parseExpr();
+    const val = try expr_mod.evaluate(node, st, .{});
+    const category: u8 = @intFromFloat(val);
+    if (category < 1 or category > 3) return errors.ParseError.InvalidStatement;
+    st.umem(category);
+    return .next;
+}
+
+/// CURR 1K / CURR 2K / CURR 3K — записать в переменную K текущий размер
+/// одномерных массивов, число строк двумерных массивов или число
+/// элементов строкового массива соответственно (по официальному help DIKAR v7).
+fn execCurr(
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    if (args.len != 2 or args[1].kind != .identifier or args[1].text.len != 1) {
+        return errors.ParseError.InvalidStatement;
+    }
+    const category = try parseCategoryDigit(args[0]);
+    const letter = InterpreterState.letterIndex(args[1].text[0]) orelse return errors.ParseError.InvalidVariableName;
+    const val: f32 = switch (category) {
+        1 => @floatFromInt(st.array1d_len),
+        2 => @floatFromInt(st.array2d_rows),
+        3 => @floatFromInt(st.static_strings.len),
+        else => return errors.ParseError.InvalidStatement,
+    };
+    st.scalars[letter] = val;
+    return .next;
 }
 
 fn execGoto(

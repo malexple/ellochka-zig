@@ -23,6 +23,7 @@ LineOutOfRange,
 StringIndexOutOfBounds,
 TypeMismatch,
 StackOverflow,
+MemoryAllocationFailed,
 };
 
 pub const EllochkaError = ParseError || RuntimeError;

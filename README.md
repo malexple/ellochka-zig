@@ -16,6 +16,8 @@ zig build run -- examples/hello.ell
 ./zig-out/bin/ellochka examples/hello.ell
 ```
 
+Если есть проблемы с русскими символами в консоли  chcp 65001
+
 ## Структура проекта
 
 - `src/state.zig` — таблицы переменных, массивов, строк, режимы исполнения.
