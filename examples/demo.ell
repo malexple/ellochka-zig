@@ -1,0 +1,54 @@
+! Демо Ellochka v0.1
+CLSC
+CSIM 2
+LIST 'ДЕМО-ПРОГРАММА ELLOCHKA v0.1'
+CSIM 7
+LIST ''
+
+! Динам. строки: ввод/вывод
+LIST 'Как вас зовут? '
+VVOD $0
+LIST 'Приятно, '; $0; '!'
+LIST ''
+
+! Скаляры и арифметика
+A=5
+B=3
+C=A*B+&SQR(A)
+LIST 'A='; A; ' B='; B; ' C='; C
+LIST ''
+
+! Режимы углов
+RADI
+LIST 'sin(1.0) рад = '; &SIN(1.0)
+GRDS
+LIST 'sin(90) град = '; &SIN(90)
+RADI
+LIST ''
+
+! Цикл через метку
+CSIM 6
+N=1
+@CYCLE
+LIST 'Шаг '; N; ': N^2='; N*N
+N=N+1
+ESLI N <= 5; @CYCLE
+CSIM 7
+LIST ''
+
+! Условный переход
+K=&RAN#
+ESLI K >= 0.5; @BOLSHE
+LIST 'K='; K; ' меньше 0.5'
+GOTO @KONEC
+@BOLSHE
+LIST 'K='; K; ' больше 0.5'
+@KONEC
+
+! Задержка
+LIST 'Пауза 500 мс...'
+SLEP 500
+LIST 'Готово!'
+
+CSIM 7
+EXIT

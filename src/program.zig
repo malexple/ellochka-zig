@@ -36,7 +36,6 @@ pub const Program = struct {
     /// оставались валидными на весь срок жизни программы.
 pub fn load(allocator: std.mem.Allocator, source: []const u8) !Program {
         const owned = try allocator.dupe(u8, source);
-        errdefer allocator.free(owned);
 
         var prog = Program{ .allocator = allocator, .owned_source = owned };
         errdefer prog.deinit();
