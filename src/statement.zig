@@ -26,6 +26,29 @@ fn tokenizeLine(allocator: std.mem.Allocator, line: []const u8) ![]lexer.Token {
     return toks.toOwnedSlice(allocator);
 }
 
+/// Если токен обозначает цифру 0-9 или букву A-Z (регистронезависимо),
+/// возвращает этот символ в верхнем регистре / как цифру. Используется
+/// для разбора конструкций `$0`..`$9` и `$A`..`$Z` после токена `.dollar`.
+fn dollarTargetChar(tok: lexer.Token) ?u8 {
+    if (tok.kind == .number and tok.text.len == 1 and tok.text[0] >= '0' and tok.text[0] <= '9') {
+        return tok.text[0];
+    }
+    if (tok.kind == .identifier and tok.text.len == 1) {
+        const c = tok.text[0];
+        if ((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z')) return c;
+    }
+    return null;
+}
+
+/// Форматирует f32 в строку без лишних хвостовых нулей: 5.0 -> "5", 5.5 -> "5.5".
+fn formatScalar(buf: []u8, val: f32) []const u8 {
+    if (val == @trunc(val) and @abs(val) < 1.0e15) {
+        const i: i64 = @intFromFloat(val);
+        return std.fmt.bufPrint(buf, "{d}", .{i}) catch "";
+    }
+    return std.fmt.bufPrint(buf, "{d}", .{val}) catch "";
+}
+
 pub fn execute(
     allocator: std.mem.Allocator,
     line: []const u8,
@@ -42,6 +65,11 @@ pub fn execute(
     if (toks.len == 0) return .next;
 
     const first = toks[0];
+
+    if (first.kind == .dollar) {
+        return execDollarStatement(a, toks, st);
+    }
+
     if (first.kind != .identifier) return errors.ParseError.InvalidStatement;
 
     const name = first.text;
@@ -106,9 +134,6 @@ pub fn execute(
 
     if (name.len == 1 and InterpreterState.letterIndex(name[0]) != null) {
         return execAssignment(a, toks, st);
-    }
-    if (first.kind == .dollar) {
-        return errors.ParseError.ExtensionNotImplemented;
     }
 
     return errors.ParseError.ExtensionNotImplemented;
@@ -434,11 +459,12 @@ fn printSegment(
         stdout.print("{s}", .{segment[0].text}) catch {};
         return;
     }
-    if (segment.len == 2 and segment[0].kind == .dollar and segment[1].kind == .number) {
-        const idx = std.fmt.parseInt(usize, segment[1].text, 10) catch return errors.ParseError.InvalidVariableName;
-        if (idx >= 10) return errors.ParseError.InvalidVariableName;
-        stdout.print("{s}", .{st.dynamic_strings[idx].data}) catch {};
-        return;
+    if (segment.len == 2 and segment[0].kind == .dollar) {
+        if (dollarTargetChar(segment[1])) |ch| {
+            const bytes = try st.resolveStringBytes(ch);
+            stdout.print("{s}", .{bytes}) catch {};
+            return;
+        }
     }
     var parser = expr_mod.Parser.init(allocator, segment);
     const node = try parser.parseExpr();
@@ -491,17 +517,177 @@ fn readSegment(
         }
         return;
     }
-    if (segment.len == 2 and segment[0].kind == .dollar and segment[1].kind == .number) {
-        const idx = std.fmt.parseInt(usize, segment[1].text, 10) catch return errors.ParseError.InvalidVariableName;
-        if (idx >= 10) return errors.ParseError.InvalidVariableName;
-        var buf: [1024]u8 = undefined;
-        var stdin_reader: std.Io.File.Reader = .init(.stdin(), io, &buf);
-        const line = stdin_reader.interface.takeDelimiterExclusive('\n') catch "";
-        const trimmed = std.mem.trimEnd(u8, line, "\r");
-        st.dynamic_strings[idx].set(st.allocator, trimmed) catch return errors.RuntimeError.StringIndexOutOfBounds;
+    if (segment.len == 2 and segment[0].kind == .dollar) {
+        if (dollarTargetChar(segment[1])) |ch| {
+            var buf: [1024]u8 = undefined;
+            var stdin_reader: std.Io.File.Reader = .init(.stdin(), io, &buf);
+            const line = stdin_reader.interface.takeDelimiterExclusive('\n') catch "";
+            const trimmed = std.mem.trimEnd(u8, line, "\r");
+            if (ch >= '0' and ch <= '9') {
+                if (trimmed.len > state_mod.MAX_DYNAMIC_STRING_LEN) return errors.RuntimeError.StringTooLong;
+                st.dynamic_strings[ch - '0'].set(st.allocator, trimmed) catch return errors.RuntimeError.MemoryAllocationFailed;
+            } else {
+                try st.setStaticString(ch, trimmed);
+            }
+            return;
+        }
+    }
+    return errors.ParseError.ExtensionNotImplemented;
+}
+
+/// Разбирает и выполняет присваивание текстовой переменной:
+/// $0 = ... / $A = ... (конкатенация через +), либо запись кода символа
+/// $?[индекс] = выражение. `toks[0]` обязан быть токеном `.dollar`.
+fn execDollarStatement(
+    allocator: std.mem.Allocator,
+    toks: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    if (toks.len < 2 or toks[0].kind != .dollar) return errors.ParseError.InvalidStatement;
+    const ch = dollarTargetChar(toks[1]) orelse return errors.ParseError.InvalidVariableName;
+    var idx: usize = 2;
+
+    if (idx < toks.len and toks[idx].kind == .lbracket) {
+        idx += 1;
+        const bracket_start = idx;
+        var depth: usize = 1;
+        while (idx < toks.len and depth > 0) {
+            if (toks[idx].kind == .lbracket) depth += 1;
+            if (toks[idx].kind == .rbracket) { depth -= 1; if (depth == 0) break; }
+            idx += 1;
+        }
+        if (idx >= toks.len) return errors.ParseError.UnbalancedBrackets;
+        const bracket_end = idx;
+        idx += 1;
+        if (idx >= toks.len or toks[idx].kind != .equals) return errors.ParseError.InvalidStatement;
+        idx += 1;
+
+        var ip = expr_mod.Parser.init(allocator, toks[bracket_start..bracket_end]);
+        const inode = try ip.parseExpr();
+        const idx_f = try expr_mod.evaluate(inode, st, .{});
+        if (idx_f < 1) return errors.RuntimeError.IndexOutOfBounds;
+        const char_index: usize = @intFromFloat(idx_f);
+
+        var vp = expr_mod.Parser.init(allocator, toks[idx..]);
+        const vnode = try vp.parseExpr();
+        const val_f = try expr_mod.evaluate(vnode, st, .{});
+        const clamped = std.math.clamp(val_f, 0.0, 255.0);
+        const byte_val: u8 = @intFromFloat(clamped);
+
+        try st.writeCharCode(ch, char_index, byte_val);
+        return .next;
+    }
+
+    if (idx >= toks.len or toks[idx].kind != .equals) return errors.ParseError.InvalidStatement;
+    idx += 1;
+    const rhs = toks[idx..];
+    if (rhs.len == 0) return errors.ParseError.InvalidStatement;
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= rhs.len) {
+        if (i == rhs.len or rhs[i].kind == .plus) {
+            const seg = rhs[start..i];
+            try appendStringComponent(allocator, &buf, seg, st);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    const result = buf.items;
+
+    if (ch >= '0' and ch <= '9') {
+        if (result.len > state_mod.MAX_DYNAMIC_STRING_LEN) return errors.RuntimeError.StringTooLong;
+        st.dynamic_strings[ch - '0'].set(st.allocator, result) catch return errors.RuntimeError.MemoryAllocationFailed;
+    } else {
+        try st.setStaticString(ch, result);
+    }
+    return .next;
+}
+
+/// Один компонент конкатенации: строковая константа, ссылка на текстовую
+/// переменную ($0-$9 / $A-$Z) или простая переменная (число -> строка).
+fn appendStringComponent(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    seg: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!void {
+    if (seg.len == 0) return errors.ParseError.InvalidStatement;
+    if (seg.len == 1 and seg[0].kind == .string_literal) {
+        buf.appendSlice(allocator, seg[0].text) catch return errors.RuntimeError.MemoryAllocationFailed;
+        return;
+    }
+    if (seg.len == 2 and seg[0].kind == .dollar) {
+        if (dollarTargetChar(seg[1])) |ch| {
+            const bytes = try st.resolveStringBytes(ch);
+            buf.appendSlice(allocator, bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
+            return;
+        }
+        return errors.ParseError.InvalidVariableName;
+    }
+    if (seg.len == 1 and seg[0].kind == .identifier and seg[0].text.len == 1) {
+        const letter = InterpreterState.letterIndex(seg[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
+        var numbuf: [64]u8 = undefined;
+        const s = formatScalar(&numbuf, st.scalars[letter]);
+        buf.appendSlice(allocator, s) catch return errors.RuntimeError.MemoryAllocationFailed;
         return;
     }
     return errors.ParseError.ExtensionNotImplemented;
+}
+
+/// Токенизирует и вычисляет арифметическое выражение, хранящееся внутри
+/// текстовой переменной (оператор присваивания `A#$текст`, вариант 6).
+/// Ошибки разбора конвертируются в RuntimeError.InvalidExpressionInString;
+/// ошибки самого вычисления (деление на ноль и т.д.) передаются как есть.
+fn evalStringExpression(
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    st: *InterpreterState,
+) errors.EllochkaError!f32 {
+    const toks = tokenizeLine(allocator, content) catch return errors.RuntimeError.InvalidExpressionInString;
+    if (toks.len == 0) return errors.RuntimeError.InvalidExpressionInString;
+    var parser = expr_mod.Parser.init(allocator, toks);
+    const node = parser.parseExpr() catch return errors.RuntimeError.InvalidExpressionInString;
+    return expr_mod.evaluate(node, st, .{});
+}
+
+/// Записывает вычисленное значение val в цель присваивания: простую
+/// переменную, элемент одномерного или двумерного массива.
+fn storeAssignedValue(
+    allocator: std.mem.Allocator,
+    st: *InterpreterState,
+    letter: u8,
+    is_array1d: bool,
+    is_array2d: bool,
+    index1_tokens: []lexer.Token,
+    index2_tokens: []lexer.Token,
+    val: f32,
+) errors.EllochkaError!void {
+    if (is_array1d) {
+        var ip = expr_mod.Parser.init(allocator, index1_tokens);
+        const inode = try ip.parseExpr();
+        const idx_f = try expr_mod.evaluate(inode, st, .{});
+        const i: usize = @intFromFloat(idx_f);
+        const arr = st.arrays1d[letter];
+        if (i < 1 or i > arr.len) return errors.RuntimeError.IndexOutOfBounds;
+        arr[i - 1] = val;
+    } else if (is_array2d) {
+        var rp = expr_mod.Parser.init(allocator, index1_tokens);
+        const rnode = try rp.parseExpr();
+        const row_f = try expr_mod.evaluate(rnode, st, .{});
+        var cp = expr_mod.Parser.init(allocator, index2_tokens);
+        const cnode = try cp.parseExpr();
+        const col_f = try expr_mod.evaluate(cnode, st, .{});
+        const row: usize = @intFromFloat(row_f);
+        const col: usize = @intFromFloat(col_f);
+        const arr = st.arrays2d[letter];
+        if (row < 1 or row > arr.rows or col < 1 or col > arr.cols)
+            return errors.RuntimeError.IndexOutOfBounds;
+        arr.data[arr.indexOf(row - 1, col - 1)] = val;
+    } else {
+        st.scalars[letter] = val;
+    }
 }
 
 fn execAssignment(
@@ -552,10 +738,57 @@ fn execAssignment(
         }
     }
 
-    if (idx >= toks.len or toks[idx].kind != .equals) {
-        return errors.ParseError.InvalidStatement;
-    }
+    if (idx >= toks.len) return errors.ParseError.InvalidStatement;
+    const op = toks[idx].kind;
     idx += 1;
+
+    // Вариант 6: A#$текст — вычислить выражение, хранящееся в строке.
+    if (op == .hash) {
+        if (is_implicit_1d or is_implicit_2d) return errors.ParseError.InvalidStatement;
+        if (idx >= toks.len or toks[idx].kind != .dollar) return errors.ParseError.InvalidStatement;
+        idx += 1;
+        if (idx >= toks.len) return errors.ParseError.InvalidStatement;
+        const ch = dollarTargetChar(toks[idx]) orelse return errors.ParseError.InvalidVariableName;
+        const content = try st.resolveStringBytes(ch);
+        const val = try evalStringExpression(allocator, content, st);
+        try storeAssignedValue(allocator, st, letter, is_array1d, is_array2d, index1_tokens, index2_tokens, val);
+        return .next;
+    }
+
+    if (op != .equals and op != .colon) return errors.ParseError.InvalidStatement;
+
+    // Вариант 5: A:$?[индекс] — присвоить код символа из строки.
+    if (op == .colon and idx < toks.len and toks[idx].kind == .dollar) {
+        if (is_implicit_1d or is_implicit_2d) return errors.ParseError.InvalidStatement;
+        idx += 1;
+        if (idx >= toks.len) return errors.ParseError.InvalidStatement;
+        const ch = dollarTargetChar(toks[idx]) orelse return errors.ParseError.InvalidVariableName;
+        idx += 1;
+        if (idx >= toks.len or toks[idx].kind != .lbracket) return errors.ParseError.InvalidStatement;
+        idx += 1;
+        const bracket_start = idx;
+        var depth: usize = 1;
+        while (idx < toks.len and depth > 0) {
+            if (toks[idx].kind == .lbracket) depth += 1;
+            if (toks[idx].kind == .rbracket) { depth -= 1; if (depth == 0) break; }
+            idx += 1;
+        }
+        if (idx >= toks.len) return errors.ParseError.UnbalancedBrackets;
+        const bracket_end = idx;
+
+        var ip = expr_mod.Parser.init(allocator, toks[bracket_start..bracket_end]);
+        const inode = try ip.parseExpr();
+        const idxf = try expr_mod.evaluate(inode, st, .{});
+        if (idxf < 1) return errors.RuntimeError.IndexOutOfBounds;
+        const char_index: usize = @intFromFloat(idxf);
+        const bytes = try st.resolveStringBytes(ch);
+        if (char_index == 0 or char_index > bytes.len) return errors.RuntimeError.IndexOutOfBounds;
+        const val: f32 = @floatFromInt(bytes[char_index - 1]);
+        try storeAssignedValue(allocator, st, letter, is_array1d, is_array2d, index1_tokens, index2_tokens, val);
+        return .next;
+    }
+
+    // Варианты 1-4: обычное выражение (= или синоним :).
     const expr_tokens = toks[idx..];
 
     if (is_implicit_1d) {
@@ -593,30 +826,6 @@ fn execAssignment(
     var parser = expr_mod.Parser.init(allocator, expr_tokens);
     const node = try parser.parseExpr();
     const val = try expr_mod.evaluate(node, st, .{});
-
-    if (is_array1d) {
-        var ip = expr_mod.Parser.init(allocator, index1_tokens);
-        const inode = try ip.parseExpr();
-        const idx_f = try expr_mod.evaluate(inode, st, .{});
-        const i: usize = @intFromFloat(idx_f);
-        const arr = st.arrays1d[letter];
-        if (i < 1 or i > arr.len) return errors.RuntimeError.IndexOutOfBounds;
-        arr[i - 1] = val;
-    } else if (is_array2d) {
-        var rp = expr_mod.Parser.init(allocator, index1_tokens);
-        const rnode = try rp.parseExpr();
-        const row_f = try expr_mod.evaluate(rnode, st, .{});
-        var cp = expr_mod.Parser.init(allocator, index2_tokens);
-        const cnode = try cp.parseExpr();
-        const col_f = try expr_mod.evaluate(cnode, st, .{});
-        const row: usize = @intFromFloat(row_f);
-        const col: usize = @intFromFloat(col_f);
-        const arr = st.arrays2d[letter];
-        if (row < 1 or row > arr.rows or col < 1 or col > arr.cols)
-            return errors.RuntimeError.IndexOutOfBounds;
-        arr.data[arr.indexOf(row - 1, col - 1)] = val;
-    } else {
-        st.scalars[letter] = val;
-    }
+    try storeAssignedValue(allocator, st, letter, is_array1d, is_array2d, index1_tokens, index2_tokens, val);
     return .next;
 }

@@ -3,6 +3,7 @@
 //! массивов, строк и режимов исполнения.
 
 const std = @import("std");
+const errors = @import("errors.zig");
 
 /// Число простых переменных / массивов A-Z.
 pub const NUM_LETTERS: usize = 26;
@@ -39,6 +40,8 @@ pub const Array2D = struct {
 };
 
 /// Динамическая строка переменной длины (используется для $0-$9).
+/// Проверка лимита MAX_DYNAMIC_STRING_LEN выполняется на стороне вызывающего
+/// кода (statement.zig) — set() больше не обрезает значение молча.
 pub const DynamicString = struct {
     data: []u8 = &[_]u8{},
 
@@ -48,10 +51,9 @@ pub const DynamicString = struct {
     }
 
     pub fn set(self: *DynamicString, allocator: std.mem.Allocator, value: []const u8) !void {
-        const capped_len = @min(value.len, MAX_DYNAMIC_STRING_LEN);
         if (self.data.len > 0) allocator.free(self.data);
-        self.data = try allocator.alloc(u8, capped_len);
-        @memcpy(self.data, value[0..capped_len]);
+        self.data = try allocator.alloc(u8, value.len);
+        @memcpy(self.data, value);
     }
 };
 
@@ -71,9 +73,10 @@ pub const InterpreterState = struct {
     /// 10 динамических строковых переменных $0-$9.
     dynamic_strings: [10]DynamicString = [_]DynamicString{.{}} ** 10,
 
-    /// Строковый массив (аналог $A-$Z / индексных строк), до 850 элементов.
+    /// Строковый массив (аналог $A-$Z), до 850 элементов по 75 байт.
     /// Реальное число используемых элементов задаётся через SIZE.
     static_strings: [][STATIC_STRING_LEN]u8 = &[_][STATIC_STRING_LEN]u8{},
+    /// Текущая активная длина каждого элемента static_strings (0..75).
     static_strings_lens: []u8 = &[_]u8{},
 
     /// Текущий (единый для группы) размер одномерных массивов,
@@ -82,9 +85,7 @@ pub const InterpreterState = struct {
     array1d_len: usize = 0,
     /// Текущее число строк двумерных массивов (CURR 2K).
     array2d_rows: usize = 0,
-    /// Текущее число столбцов двумерных массивов (запасное поле,
-    /// официальный help DIKAR v7 отдаёт CURR 3K под строковый массив,
-    /// но столбцы храним отдельно на случай уточнения семантики).
+    /// Текущее число столбцов двумерных массивов (запасное поле).
     array2d_cols: usize = 0,
 
     /// Режимы вычисления.
@@ -119,8 +120,6 @@ pub const InterpreterState = struct {
     }
 
     /// Реализация оператора SIZE для одномерного массива.
-    /// Уничтожает старые данные и выделяет новый чистый срез.
-    /// Обновляет общий счётчик array1d_len для оператора CURR.
     pub fn sizeArray1D(self: *InterpreterState, letter_index: u8, new_len: usize) !void {
         var arr = &self.arrays1d[letter_index];
         if (arr.len > 0) self.allocator.free(arr.*);
@@ -130,7 +129,6 @@ pub const InterpreterState = struct {
     }
 
     /// Реализация оператора SIZE для двумерного массива.
-    /// Обновляет общие счётчики array2d_rows/array2d_cols для CURR.
     pub fn sizeArray2D(self: *InterpreterState, letter_index: u8, rows: usize, cols: usize) !void {
         var arr = &self.arrays2d[letter_index];
         arr.deinit(self.allocator);
@@ -142,7 +140,7 @@ pub const InterpreterState = struct {
         self.array2d_cols = cols;
     }
 
-    /// Реализация оператора SIZE для строкового массива.
+    /// Реализация оператора SIZE для строкового массива ($A-$Z).
     pub fn sizeStringArray(self: *InterpreterState, new_len: usize) !void {
         if (self.static_strings.len > 0) {
             self.allocator.free(self.static_strings);
@@ -189,5 +187,65 @@ pub const InterpreterState = struct {
         if (ch >= 'A' and ch <= 'Z') return ch - 'A';
         if (ch >= 'a' and ch <= 'z') return ch - 'a';
         return null;
+    }
+
+    /// Резолвит символ после `$` (цифра 0-9 или буква A-Z) в срез байт
+    /// текущего содержимого текстовой переменной (только чтение).
+    ///
+    /// Для цифры возвращает соответствующую переменную $0-$9 напрямую.
+    /// Для буквы применяется КОСВЕННАЯ адресация: индекс элемента
+    /// строкового массива берётся из ТЕКУЩЕГО значения одноимённого
+    /// скаляра (например, при I=5 значение $I соответствует $[5]).
+    pub fn resolveStringBytes(self: *InterpreterState, ch: u8) errors.EllochkaError![]const u8 {
+        if (ch >= '0' and ch <= '9') {
+            return self.dynamic_strings[ch - '0'].data;
+        }
+        const letter = letterIndex(ch) orelse return errors.ParseError.InvalidVariableName;
+        if (self.static_strings.len == 0) return errors.RuntimeError.ArrayNotSized;
+        const scalar_val = self.scalars[letter];
+        if (std.math.isNan(scalar_val) or scalar_val < 1) return errors.RuntimeError.IndexOutOfBounds;
+        const index: usize = @intFromFloat(scalar_val);
+        if (index == 0 or index > self.static_strings.len) return errors.RuntimeError.IndexOutOfBounds;
+        const slot = index - 1;
+        return self.static_strings[slot][0..self.static_strings_lens[slot]];
+    }
+
+    /// Полное присваивание содержимого текстовой переменной $0-$9 или $A-$Z
+    /// (для $A-$Z — та же косвенная адресация, что и в resolveStringBytes).
+    /// Проверяет лимит длины 75 байт для static_strings (для $0-$9 лимит
+    /// 1024 проверяется на стороне statement.zig перед вызовом DynamicString.set).
+    pub fn setStaticString(self: *InterpreterState, ch: u8, value: []const u8) errors.EllochkaError!void {
+        const letter = letterIndex(ch) orelse return errors.ParseError.InvalidVariableName;
+        if (self.static_strings.len == 0) return errors.RuntimeError.ArrayNotSized;
+        const scalar_val = self.scalars[letter];
+        if (std.math.isNan(scalar_val) or scalar_val < 1) return errors.RuntimeError.IndexOutOfBounds;
+        const index: usize = @intFromFloat(scalar_val);
+        if (index == 0 or index > self.static_strings.len) return errors.RuntimeError.IndexOutOfBounds;
+        if (value.len > STATIC_STRING_LEN) return errors.RuntimeError.StringTooLong;
+        const slot = index - 1;
+        @memcpy(self.static_strings[slot][0..value.len], value);
+        self.static_strings_lens[slot] = @intCast(value.len);
+    }
+
+    /// Запись кода символа (0-255) на позицию index_1based (1..len) внутри
+    /// текстовой переменной $0-$9 или $A-$Z. Строка не расширяется —
+    /// позиция должна находиться в пределах уже существующей длины.
+    pub fn writeCharCode(self: *InterpreterState, ch: u8, index_1based: usize, value: u8) errors.EllochkaError!void {
+        if (ch >= '0' and ch <= '9') {
+            const buf = self.dynamic_strings[ch - '0'].data;
+            if (index_1based == 0 or index_1based > buf.len) return errors.RuntimeError.IndexOutOfBounds;
+            buf[index_1based - 1] = value;
+            return;
+        }
+        const letter = letterIndex(ch) orelse return errors.ParseError.InvalidVariableName;
+        if (self.static_strings.len == 0) return errors.RuntimeError.ArrayNotSized;
+        const scalar_val = self.scalars[letter];
+        if (std.math.isNan(scalar_val) or scalar_val < 1) return errors.RuntimeError.IndexOutOfBounds;
+        const sidx: usize = @intFromFloat(scalar_val);
+        if (sidx == 0 or sidx > self.static_strings.len) return errors.RuntimeError.IndexOutOfBounds;
+        const slot = sidx - 1;
+        const len = self.static_strings_lens[slot];
+        if (index_1based == 0 or index_1based > len) return errors.RuntimeError.IndexOutOfBounds;
+        self.static_strings[slot][index_1based - 1] = value;
     }
 };

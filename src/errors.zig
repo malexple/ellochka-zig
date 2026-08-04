@@ -24,6 +24,8 @@ StringIndexOutOfBounds,
 TypeMismatch,
 StackOverflow,
 MemoryAllocationFailed,
+StringTooLong,
+InvalidExpressionInString,
 };
 
 pub const EllochkaError = ParseError || RuntimeError;
