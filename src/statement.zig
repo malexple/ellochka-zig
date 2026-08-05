@@ -358,6 +358,9 @@ pub fn execute(
     if (eq(name, "MAXA")) {
         return execMinMax(toks[1..], st, true);
     }
+    if (eq(name, "REAK")) {
+        return execReak(toks[1..], st);
+    }
     if (eq(name, "DATA")) {
         return execData(a, toks[1..], st, prog);
     }
@@ -2269,5 +2272,208 @@ fn execSbmp(
         path_buf.appendSlice(allocator, ".bmp") catch return errors.RuntimeError.MemoryAllocationFailed;
     }
     graphics.saveBmp(io, path_buf.items) catch return errors.RuntimeError.FileError;
+    return .next;
+}
+
+fn reakModel(x: f64, a: f64, b: f64, c: f64) f64 {
+    return a * std.math.pow(f64, x, b) * @exp(-c * x);
+}
+
+/// Решает систему 3x3 методом Гаусса с выбором главного элемента.
+/// Возвращает null, если матрица вырождена (нужно увеличить демпфирование).
+fn solve3x3(mat_in: [3][4]f64) ?[3]f64 {
+    var m = mat_in;
+    var pivot_row_idx: usize = 0;
+    while (pivot_row_idx < 3) : (pivot_row_idx += 1) {
+        var best_row = pivot_row_idx;
+        var best_val = @abs(m[pivot_row_idx][pivot_row_idx]);
+        var scan_row = pivot_row_idx + 1;
+        while (scan_row < 3) : (scan_row += 1) {
+            const v = @abs(m[scan_row][pivot_row_idx]);
+            if (v > best_val) {
+                best_val = v;
+                best_row = scan_row;
+            }
+        }
+        if (best_val < 1e-12) return null;
+        if (best_row != pivot_row_idx) {
+            const tmp = m[pivot_row_idx];
+            m[pivot_row_idx] = m[best_row];
+            m[best_row] = tmp;
+        }
+        var elim_row = pivot_row_idx + 1;
+        while (elim_row < 3) : (elim_row += 1) {
+            const factor = m[elim_row][pivot_row_idx] / m[pivot_row_idx][pivot_row_idx];
+            var col_idx = pivot_row_idx;
+            while (col_idx < 4) : (col_idx += 1) {
+                m[elim_row][col_idx] -= factor * m[pivot_row_idx][col_idx];
+            }
+        }
+    }
+    var x: [3]f64 = undefined;
+    var back_idx: i64 = 2;
+    while (back_idx >= 0) : (back_idx -= 1) {
+        const idx: usize = @intCast(back_idx);
+        var sum = m[idx][3];
+        var col_idx = idx + 1;
+        while (col_idx < 3) : (col_idx += 1) {
+            sum -= m[idx][col_idx] * x[col_idx];
+        }
+        x[idx] = sum / m[idx][idx];
+        if (back_idx == 0) break;
+    }
+    return x;
+}
+
+/// REAK X;Y;A;B;C;R;F
+/// Нелинейная регрессия функцией реакции Y = A*X^B*exp(-C*X) методом
+/// Гаусса-Ньютона с демпфированием (Levenberg-Marquardt). A,B,C на входе
+/// - начальное приближение, на выходе - уточнённые коэффициенты. R -
+/// коэффициент корреляции Пирсона (факт/модель), F - RMSE остатков.
+fn execReak(
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(7, args);
+    const x_letter = try singleLetterFromTokens(parts[0]);
+    const y_letter = try singleLetterFromTokens(parts[1]);
+    const a_letter = try singleLetterFromTokens(parts[2]);
+    const b_letter = try singleLetterFromTokens(parts[3]);
+    const c_letter = try singleLetterFromTokens(parts[4]);
+    const r_letter = try singleLetterFromTokens(parts[5]);
+    const f_letter = try singleLetterFromTokens(parts[6]);
+
+    const xs = st.arrays1d[x_letter];
+    const ys = st.arrays1d[y_letter];
+    if (xs.len == 0 or ys.len == 0) return errors.RuntimeError.ArrayNotSized;
+    if (xs.len != ys.len) return errors.ParseError.InvalidStatement;
+    const m = xs.len;
+
+    for (xs) |xv| {
+        if (xv <= 0) return errors.RuntimeError.MathDomainError;
+    }
+
+    var a: f64 = st.scalars[a_letter];
+    var b: f64 = st.scalars[b_letter];
+    var c: f64 = st.scalars[c_letter];
+    if (@abs(a) < 1e-6) a = 0.01;
+
+    var lambda: f64 = 1.0e-3;
+
+    var iter: usize = 0;
+    while (iter < 100) : (iter += 1) {
+        var jtj: [3][3]f64 = .{ .{ 0, 0, 0 }, .{ 0, 0, 0 }, .{ 0, 0, 0 } };
+        var jtr: [3]f64 = .{ 0, 0, 0 };
+        var sse: f64 = 0.0;
+
+        {
+            var i: usize = 0;
+            while (i < m) : (i += 1) {
+                const xv: f64 = xs[i];
+                const yv: f64 = ys[i];
+                const fv = reakModel(xv, a, b, c);
+                const resid = yv - fv;
+                sse += resid * resid;
+
+                const grads = [3]f64{ fv / a, fv * @log(xv), -fv * xv };
+
+                var p_row: usize = 0;
+                while (p_row < 3) : (p_row += 1) {
+                    jtr[p_row] += grads[p_row] * resid;
+                    var p_col: usize = 0;
+                    while (p_col < 3) : (p_col += 1) {
+                        jtj[p_row][p_col] += grads[p_row] * grads[p_col];
+                    }
+                }
+            }
+        }
+
+        var mat: [3][4]f64 = undefined;
+        {
+            var aug_row: usize = 0;
+            while (aug_row < 3) : (aug_row += 1) {
+                var aug_col: usize = 0;
+                while (aug_col < 3) : (aug_col += 1) {
+                    mat[aug_row][aug_col] = jtj[aug_row][aug_col];
+                    if (aug_row == aug_col) mat[aug_row][aug_col] += lambda * jtj[aug_row][aug_col];
+                }
+                mat[aug_row][3] = jtr[aug_row];
+            }
+        }
+
+        const delta = solve3x3(mat) orelse {
+            lambda *= 4.0;
+            if (lambda > 1e12) break;
+            continue;
+        };
+
+        const new_a = a + delta[0];
+        const new_b = b + delta[1];
+        const new_c = c + delta[2];
+
+        var new_sse: f64 = 0.0;
+        {
+            var j: usize = 0;
+            while (j < m) : (j += 1) {
+                const resid = ys[j] - reakModel(xs[j], new_a, new_b, new_c);
+                new_sse += resid * resid;
+            }
+        }
+
+        if (new_sse < sse) {
+            const converged = @abs(sse - new_sse) < 1e-6;
+            a = new_a;
+            b = new_b;
+            c = new_c;
+            lambda = @max(lambda / 3.0, 1e-12);
+            if (converged) break;
+        } else {
+            lambda *= 4.0;
+            if (lambda > 1e12) break;
+        }
+    }
+
+    st.scalars[a_letter] = @floatCast(a);
+    st.scalars[b_letter] = @floatCast(b);
+    st.scalars[c_letter] = @floatCast(c);
+
+    var sum_y: f64 = 0.0;
+    var sum_yhat: f64 = 0.0;
+    {
+        var idx2: usize = 0;
+        while (idx2 < m) : (idx2 += 1) {
+            sum_y += ys[idx2];
+            sum_yhat += reakModel(xs[idx2], a, b, c);
+        }
+    }
+    const m_f: f64 = @floatFromInt(m);
+    const mean_y = sum_y / m_f;
+    const mean_yhat = sum_yhat / m_f;
+
+    var cov: f64 = 0.0;
+    var var_y: f64 = 0.0;
+    var var_yhat: f64 = 0.0;
+    var sse_final: f64 = 0.0;
+    {
+        var idx3: usize = 0;
+        while (idx3 < m) : (idx3 += 1) {
+            const yhat = reakModel(xs[idx3], a, b, c);
+            const dy = ys[idx3] - mean_y;
+            const dyh = yhat - mean_yhat;
+            cov += dy * dyh;
+            var_y += dy * dy;
+            var_yhat += dyh * dyh;
+            const resid = ys[idx3] - yhat;
+            sse_final += resid * resid;
+        }
+    }
+
+    const denom = @sqrt(var_y * var_yhat);
+    const r: f64 = if (denom > 1e-12) cov / denom else 0.0;
+    const rmse: f64 = @sqrt(sse_final / m_f);
+
+    st.scalars[r_letter] = @floatCast(r);
+    st.scalars[f_letter] = @floatCast(rmse);
+
     return .next;
 }

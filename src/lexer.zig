@@ -102,8 +102,15 @@ pub const Lexer = struct {
         };
 
         // Числовая константа: цифры, точка, экспонента (1.5, 6.02e-23)
+        // Также поддерживаем запись без ведущего нуля: .011 (как в
+        // "X[]=1+.011*(?-1)" из sample.ela).
         if (isDigit(c)) {
             return self.lexNumber(start);
+        }
+        if (c == '.') {
+            if (self.peekAt(1)) |next_ch| {
+                if (isDigit(next_ch)) return self.lexNumber(start);
+            }
         }
 
         // Идентификатор: буквенная последовательность (операторы, переменные)

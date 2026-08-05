@@ -244,6 +244,17 @@ pub const Parser = struct {
             return self.alloc(.{ .scalar = letter });
         }
         _ = self.advance(); // [
+
+        // X[] внутри выражения - сокращение для "X по индексу текущей
+        // неявной итерации", то же самое, что и X[?]. Встречается в
+        // конструкциях вида Y[]=A*X[]^B*&exp(-C*X[])+&ran#, где X[]
+        // на правой части ссылается на тот же индекс, что и Y[] слева.
+        if (self.peek().kind == .rbracket) {
+            _ = self.advance();
+            const idx_node = try self.alloc(.{ .question_symbol = 0 });
+            return self.alloc(.{ .array1d = .{ .letter = letter, .index = idx_node } });
+        }
+
         const first = try self.parseExpr();
         if (self.peek().kind == .comma) {
             _ = self.advance();
