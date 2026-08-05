@@ -1,0 +1,57 @@
+CLSC
+LIST 'Тест READ / PUTF-GETF 2K и A'
+
+! --- 1) Скаляр A: PUTF/GETF без L ---
+A=3.14159
+UDAL 'test_scalar.tmp'
+PUTF 'test_scalar.tmp';A;4;0
+GETF 'test_scalar.tmp';B;4;0
+LIST 'Скаляр: A='; A; ' B(из файла)='; B
+
+! --- 2) 2D массив: PUTF/GETF вариант 2K ---
+SIZE [2,3]=K
+K[1,1]=10
+K[1,2]=20
+K[1,3]=30
+K[2,1]=40
+K[2,2]=50
+K[2,3]=60
+UDAL 'test_2k.tmp'
+PUTF 'test_2k.tmp';2K;4;0;4
+SIZE [2,3]=M
+GETF 'test_2k.tmp';2M;4;0;4
+LIST 'PUTF/GETF 2K: '; M[1,1];' ';M[1,2];' ';M[1,3]
+LIST '              '; M[2,1];' ';M[2,2];' ';M[2,3]
+
+! --- 3) READ F;2K (текстовый файл в 2D массив) ---
+UDAL 'test_read2d.tmp'
+TYPE 'test_read2d.tmp';11;' ';22;' ';33
+TYPE 'test_read2d.tmp';44;' ';55;' ';66
+SIZE [2,3]=N
+READ 'test_read2d.tmp';2N
+LIST 'READ 2D: '; N[1,1];' ';N[1,2];' ';N[1,3]
+LIST '         '; N[2,1];' ';N[2,2];' ';N[2,3]
+
+! --- 4) READ F;X;Y (файл в пару 1D массивов) ---
+UDAL 'test_readxy.tmp'
+TYPE 'test_readxy.tmp';1;' ';100
+TYPE 'test_readxy.tmp';2;' ';200
+TYPE 'test_readxy.tmp';3;' ';300
+SIZE [3]=P;Q
+READ 'test_readxy.tmp';P;Q
+LIST 'READ X;Y: P='; P[1];',';P[2];',';P[3]
+LIST '          Q='; Q[1];',';Q[2];',';Q[3]
+
+! --- 5) READ F (текстовый файл в $$) ---
+UDAL 'test_readdollar.tmp'
+TYPE 'test_readdollar.tmp';'первая строка'
+TYPE 'test_readdollar.tmp';'вторая строка'
+SIZE 5
+READ 'test_readdollar.tmp'
+D:1
+LIST 'READ $$[1]: '; $D
+D:2
+LIST 'READ $$[2]: '; $D
+
+LIST 'Готово'
+EXIT

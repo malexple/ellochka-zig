@@ -468,6 +468,10 @@ pub fn execute(
         return execVvod(a, toks[1..], st, stdout, io);
     }
 
+    if (eq(name, "READ")) {
+        return execRead(a, toks[1..], st, io);
+    }
+
     if (name.len == 1 and InterpreterState.letterIndex(name[0]) != null) {
         return execAssignment(a, toks, st);
     }
@@ -1940,9 +1944,10 @@ fn execPutfGetf(
     const path_bytes = try resolveStringOperand(f_tokens, st);
     const path_copy = allocator.dupe(u8, path_bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
 
+    // Варианты 1M / 2K: F;1;M;D;B;L или F;2;K;D;B;L
     if (rest.len >= 3 and rest[0].kind == .number and rest[1].kind == .identifier and rest[1].text.len == 1 and rest[2].kind == .semicolon) {
         const category = try parseCategoryDigit(rest[0]);
-        if (category != 1) return errors.ParseError.ExtensionNotImplemented;
+        if (category != 1 and category != 2) return errors.ParseError.ExtensionNotImplemented;
         const letter = InterpreterState.letterIndex(rest[1].text[0]) orelse return errors.ParseError.InvalidVariableName;
 
         const params = try splitBySemicolon(3, rest[3..]);
@@ -1963,9 +1968,16 @@ fn execPutfGetf(
         const l: usize = @intFromFloat(lval);
         if (l == 0) return errors.ParseError.InvalidStatement;
 
-        const count = st.array1d_len;
-        var arr = st.arrays1d[letter];
-        if (arr.len < count) return errors.RuntimeError.ArrayNotSized;
+        var target: []f32 = undefined;
+        var count: usize = undefined;
+        if (category == 1) {
+            count = st.array1d_len;
+            target = st.arrays1d[letter];
+        } else {
+            count = st.array2d_rows * st.array2d_cols;
+            target = st.arrays2d[letter].data;
+        }
+        if (target.len < count) return errors.RuntimeError.ArrayNotSized;
 
         if (is_write) {
             var file = std.Io.Dir.cwd().createFile(io, path_copy, .{ .truncate = false, .read = true }) catch return errors.RuntimeError.FileError;
@@ -1973,7 +1985,7 @@ fn execPutfGetf(
             var i: usize = 0;
             while (i < count) : (i += 1) {
                 const pos = i * l + b;
-                const bytes: [4]u8 = @bitCast(arr[i]);
+                const bytes: [4]u8 = @bitCast(target[i]);
                 file.writePositionalAll(io, bytes[0..], pos) catch return errors.RuntimeError.FileError;
             }
         } else {
@@ -1985,12 +1997,45 @@ fn execPutfGetf(
                 var bytes: [4]u8 = undefined;
                 const n = file.readPositionalAll(io, bytes[0..], pos) catch return errors.RuntimeError.FileError;
                 if (n < 4) return errors.RuntimeError.FileError;
-                arr[i] = @bitCast(bytes);
+                target[i] = @bitCast(bytes);
             }
         }
         return .next;
     }
 
+    // Вариант A: F;A;D;B (простая переменная, без L - шаг не нужен)
+    if (rest.len >= 2 and rest[0].kind == .identifier and rest[0].text.len == 1 and rest[1].kind == .semicolon) {
+        const letter = InterpreterState.letterIndex(rest[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
+        const params = try splitBySemicolon(2, rest[2..]);
+
+        var dp = expr_mod.Parser.init(allocator, params[0]);
+        const dnode = try dp.parseExpr();
+        const dval = try expr_mod.evaluate(dnode, st, .{});
+        const d: usize = @intFromFloat(dval);
+        if (d != 4) return errors.ParseError.ExtensionNotImplemented;
+
+        var bp = expr_mod.Parser.init(allocator, params[1]);
+        const bnode = try bp.parseExpr();
+        const bval = try expr_mod.evaluate(bnode, st, .{});
+        const b: usize = @intFromFloat(bval);
+
+        if (is_write) {
+            var file = std.Io.Dir.cwd().createFile(io, path_copy, .{ .truncate = false, .read = true }) catch return errors.RuntimeError.FileError;
+            defer file.close(io);
+            const bytes: [4]u8 = @bitCast(st.scalars[letter]);
+            file.writePositionalAll(io, bytes[0..], b) catch return errors.RuntimeError.FileError;
+        } else {
+            var file = std.Io.Dir.cwd().openFile(io, path_copy, .{}) catch return errors.RuntimeError.FileError;
+            defer file.close(io);
+            var bytes: [4]u8 = undefined;
+            const n = file.readPositionalAll(io, bytes[0..], b) catch return errors.RuntimeError.FileError;
+            if (n < 4) return errors.RuntimeError.FileError;
+            st.scalars[letter] = @bitCast(bytes);
+        }
+        return .next;
+    }
+
+    // Вариант со строкой: F;$P;R;B (без изменений, как было у вас)
     if (rest.len >= 3 and rest[0].kind == .dollar and rest[1].kind != .dollar and rest[2].kind == .semicolon) {
         const p_ch = dollarTargetChar(rest[1]) orelse return errors.ParseError.InvalidVariableName;
         const params = try splitBySemicolon(2, rest[3..]);
@@ -2557,5 +2602,130 @@ fn execDosc(
     child.stderr_behavior = .Inherit;
 
     _ = child.spawnAndWait(io) catch return errors.RuntimeError.FileError;
+    return .next;
+}
+
+/// READ F;X;Y  - читает пары чисел из текстового файла (разделители:
+///               пробел/таб/запятая) в массивы X,Y, по одной паре на
+///               строку файла, пока не кончится файл или не заполнятся
+///               оба массива. Строки без двух валидных чисел тихо
+///               пропускаются (без увеличения индекса).
+/// READ F;2;K  - то же самое, но построчно заполняет 2D-массив K:
+///               каждая строка файла -> одна строка матрицы.
+/// READ F      - читает строки файла прямо в строковый массив $$.
+/// Во всех формах отсутствие файла или ошибка чтения не прерывают
+/// выполнение программы - операция просто ничего не делает дальше.
+fn execRead(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+    io: std.Io,
+) errors.EllochkaError!ExecResult {
+    var semi_pos: ?usize = null;
+    for (args, 0..) |t, i| {
+        if (t.kind == .semicolon) {
+            semi_pos = i;
+            break;
+        }
+    }
+
+    const path_tokens = if (semi_pos) |sep| args[0..sep] else args;
+    const path_bytes = try resolveStringOperand(path_tokens, st);
+    const path_copy = allocator.dupe(u8, path_bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
+
+    var file = std.Io.Dir.cwd().openFile(io, path_copy, .{}) catch return .next;
+    defer file.close(io);
+
+    var read_buf: [4096]u8 = undefined;
+    var file_reader: std.Io.File.Reader = .init(file, io, &read_buf);
+    const content = file_reader.interface.allocRemaining(allocator, .limited(4 * 1024 * 1024)) catch return .next;
+
+    // READ F (без параметров) - строки файла прямо в $$
+    if (semi_pos == null) {
+        if (st.static_strings.len == 0) return .next;
+        var lines_it = std.mem.splitScalar(u8, content, '\n');
+        var idx: usize = 0;
+        while (idx < st.static_strings.len) {
+            const raw_line = lines_it.next() orelse break;
+            const trimmed = std.mem.trimEnd(u8, raw_line, "\r");
+            idx += 1;
+            try st.setStaticStringByIndex(idx, trimmed);
+        }
+        return .next;
+    }
+
+    const sep = semi_pos.?;
+    const rest = args[sep + 1 ..];
+
+    // Форма READ F;2K (компактная запись: цифра категории и буква
+    // массива слитно, без ; между ними - как в PUTF/GETF "1M"/"2K")
+    if (rest.len == 2 and rest[0].kind == .number and rest[1].kind == .identifier and rest[1].text.len == 1) {
+        const category = try parseCategoryDigit(rest[0]);
+        if (category != 2) return errors.ParseError.ExtensionNotImplemented;
+        const k_letter = InterpreterState.letterIndex(rest[1].text[0]) orelse return errors.ParseError.InvalidVariableName;
+
+        const arr = st.arrays2d[k_letter];
+        if (arr.rows == 0 or arr.cols == 0) return errors.RuntimeError.ArrayNotSized;
+
+        const row_vals = allocator.alloc(f32, arr.cols) catch return errors.RuntimeError.MemoryAllocationFailed;
+
+        var lines_it = std.mem.splitScalar(u8, content, '\n');
+        var row: usize = 0;
+        while (row < arr.rows) {
+            const raw_line = lines_it.next() orelse break;
+            const trimmed = std.mem.trim(u8, raw_line, " \r\t");
+            if (trimmed.len == 0) continue;
+
+            var toks_it = std.mem.tokenizeAny(u8, trimmed, " \t,");
+            var row_ok = true;
+            var col: usize = 0;
+            while (col < arr.cols) : (col += 1) {
+                const tok = toks_it.next() orelse {
+                    row_ok = false;
+                    break;
+                };
+                row_vals[col] = std.fmt.parseFloat(f32, tok) catch {
+                    row_ok = false;
+                    break;
+                };
+            }
+            if (!row_ok) continue;
+
+            var c: usize = 0;
+            while (c < arr.cols) : (c += 1) {
+                arr.data[arr.indexOf(row, c)] = row_vals[c];
+            }
+            row += 1;
+        }
+        return .next;
+    }
+
+    // Форма READ F;X;Y (два отдельных 1D-массива через ;)
+    const xy_parts = try splitBySemicolon(2, rest);
+    const x_letter = try singleLetterFromTokens(xy_parts[0]);
+    const y_letter = try singleLetterFromTokens(xy_parts[1]);
+    const xs = st.arrays1d[x_letter];
+    const ys = st.arrays1d[y_letter];
+    const max_len = @min(xs.len, ys.len);
+    if (max_len == 0) return errors.RuntimeError.ArrayNotSized;
+
+    var lines_it = std.mem.splitScalar(u8, content, '\n');
+    var i: usize = 0;
+    while (i < max_len) {
+        const raw_line = lines_it.next() orelse break;
+        const trimmed = std.mem.trim(u8, raw_line, " \r\t");
+        if (trimmed.len == 0) continue;
+
+        var toks_it = std.mem.tokenizeAny(u8, trimmed, " \t,");
+        const tok1 = toks_it.next() orelse continue;
+        const tok2 = toks_it.next() orelse continue;
+        const val1 = std.fmt.parseFloat(f32, tok1) catch continue;
+        const val2 = std.fmt.parseFloat(f32, tok2) catch continue;
+
+        xs[i] = val1;
+        ys[i] = val2;
+        i += 1;
+    }
+
     return .next;
 }
