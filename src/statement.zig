@@ -491,6 +491,10 @@ pub fn execute(
         return execTran(a, toks[1..], st);
     }
 
+    if (eq(name, "USER")) {
+        return execUser(a, toks[1..], st);
+    }
+
     if (name.len == 1 and InterpreterState.letterIndex(name[0]) != null) {
         return execAssignment(a, toks, st);
     }
@@ -3299,6 +3303,168 @@ fn execTran(
         st.scalars[u_letter] = @floatFromInt(bad_count);
         st.scalars[t_letter] = 0.0;
     }
+
+    return .next;
+}
+
+/// USER F;M;E;T - аппроксимация данных (массивы X,Y - фиксированные
+/// имена) произвольной моделью, заданной выражением в F относительно
+/// X и A[1..M]. Левенберг-Марквардт с численным Якобианом по каждому
+/// параметру A[j] (метод, шаг дифференцирования - как в TRAN).
+/// E - вход: порог относительного изменения RMSE; выход: финальный
+/// RMSE. T - вход: лимит итераций; выход: остаток (0 при неудаче).
+fn execUser(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(4, args);
+    const content = try resolveStringOperand(parts[0], st);
+
+    const m_letter = try singleLetterFromTokens(parts[1]);
+    const e_letter = try singleLetterFromTokens(parts[2]);
+    const t_letter = try singleLetterFromTokens(parts[3]);
+
+    const m_count: usize = @intFromFloat(st.scalars[m_letter]);
+    if (m_count == 0) return errors.ParseError.InvalidStatement;
+
+    const e_tol: f64 = @floatCast(st.scalars[e_letter]);
+    const max_iter: usize = @intFromFloat(st.scalars[t_letter]);
+
+    const x_letter = InterpreterState.letterIndex('X') orelse unreachable;
+    const y_letter = InterpreterState.letterIndex('Y') orelse unreachable;
+    const a_letter = InterpreterState.letterIndex('A') orelse unreachable;
+
+    const xs = st.arrays1d[x_letter];
+    const ys = st.arrays1d[y_letter];
+    if (xs.len == 0 or ys.len == 0) return errors.RuntimeError.ArrayNotSized;
+    if (xs.len != ys.len) return errors.ParseError.InvalidStatement;
+    const points_len = xs.len;
+    if (points_len < m_count) return errors.RuntimeError.MathDomainError;
+
+    const coefs = st.arrays1d[a_letter];
+    if (coefs.len < m_count) return errors.RuntimeError.ArrayNotSized;
+
+    var a_cur = allocator.alloc(f64, m_count) catch return errors.RuntimeError.MemoryAllocationFailed;
+    for (0..m_count) |j| a_cur[j] = @floatCast(coefs[j]);
+
+    var f_vals = allocator.alloc(f64, points_len) catch return errors.RuntimeError.MemoryAllocationFailed;
+
+    for (0..points_len) |i| {
+        st.scalars[x_letter] = xs[i];
+        const val = try evalStringExpression(allocator, content, st);
+        f_vals[i] = @floatCast(val);
+    }
+
+    var sse: f64 = 0.0;
+    for (0..points_len) |i| {
+        const resid = @as(f64, @floatCast(ys[i])) - f_vals[i];
+        sse += resid * resid;
+    }
+    var rmse: f64 = @sqrt(sse / @as(f64, @floatFromInt(points_len)));
+
+    var lambda: f64 = 1e-3;
+    var iterations_used: usize = 0;
+    var converged = false;
+
+    while (iterations_used < max_iter) {
+        var jac = allocator.alloc([]f64, points_len) catch return errors.RuntimeError.MemoryAllocationFailed;
+        for (0..points_len) |i| jac[i] = allocator.alloc(f64, m_count) catch return errors.RuntimeError.MemoryAllocationFailed;
+
+        for (0..m_count) |j| {
+            const orig = a_cur[j];
+            const h = @max(1e-4, 1e-4 * @abs(orig));
+            a_cur[j] = orig + h;
+            for (coefs, 0..) |*v, jj| {
+                if (jj < m_count) v.* = @floatCast(a_cur[jj]);
+            }
+
+            for (0..points_len) |i| {
+                st.scalars[x_letter] = xs[i];
+                const val = try evalStringExpression(allocator, content, st);
+                jac[i][j] = (@as(f64, @floatCast(val)) - f_vals[i]) / h;
+            }
+            a_cur[j] = orig;
+        }
+        for (coefs, 0..) |*v, jj| {
+            if (jj < m_count) v.* = @floatCast(a_cur[jj]);
+        }
+
+        var jtj = allocator.alloc([]f64, m_count) catch return errors.RuntimeError.MemoryAllocationFailed;
+        for (0..m_count) |r| jtj[r] = allocator.alloc(f64, m_count + 1) catch return errors.RuntimeError.MemoryAllocationFailed;
+
+        for (0..m_count) |r| {
+            for (0..m_count) |c| {
+                var sum_val: f64 = 0.0;
+                for (0..points_len) |i| sum_val += jac[i][r] * jac[i][c];
+                jtj[r][c] = sum_val;
+                if (r == c) jtj[r][c] += lambda * sum_val;
+            }
+            var sum_res: f64 = 0.0;
+            for (0..points_len) |i| {
+                const resid = @as(f64, @floatCast(ys[i])) - f_vals[i];
+                sum_res += jac[i][r] * resid;
+            }
+            jtj[r][m_count] = sum_res;
+        }
+
+        const delta = solveLinearSystemF64(allocator, m_count, jtj) catch |err| {
+            if (err != errors.RuntimeError.MathDomainError) return err;
+            lambda *= 4.0;
+            iterations_used += 1;
+            if (lambda > 1e12) break;
+            continue;
+        };
+
+        var a_new = allocator.alloc(f64, m_count) catch return errors.RuntimeError.MemoryAllocationFailed;
+        for (0..m_count) |j| a_new[j] = a_cur[j] + delta[j];
+
+        for (coefs, 0..) |*v, jj| {
+            if (jj < m_count) v.* = @floatCast(a_new[jj]);
+        }
+        var f_new = allocator.alloc(f64, points_len) catch return errors.RuntimeError.MemoryAllocationFailed;
+        var new_sse: f64 = 0.0;
+        for (0..points_len) |i| {
+            st.scalars[x_letter] = xs[i];
+            const val = try evalStringExpression(allocator, content, st);
+            f_new[i] = @floatCast(val);
+            const resid = @as(f64, @floatCast(ys[i])) - f_new[i];
+            new_sse += resid * resid;
+        }
+        const new_rmse = @sqrt(new_sse / @as(f64, @floatFromInt(points_len)));
+
+        iterations_used += 1;
+
+        if (new_sse < sse) {
+            const rel_change = if (rmse > 1e-12) @abs(rmse - new_rmse) / rmse else @abs(rmse - new_rmse);
+            a_cur = a_new;
+            f_vals = f_new;
+            sse = new_sse;
+            rmse = new_rmse;
+            lambda = @max(lambda / 3.0, 1e-12);
+            for (coefs, 0..) |*v, jj| {
+                if (jj < m_count) v.* = @floatCast(a_cur[jj]);
+            }
+            if (rel_change < e_tol) {
+                converged = true;
+                break;
+            }
+        } else {
+            for (coefs, 0..) |*v, jj| {
+                if (jj < m_count) v.* = @floatCast(a_cur[jj]);
+            }
+            lambda *= 4.0;
+            if (lambda > 1e12) break;
+        }
+    }
+
+    for (coefs, 0..) |*v, jj| {
+        if (jj < m_count) v.* = @floatCast(a_cur[jj]);
+    }
+
+    st.scalars[e_letter] = @floatCast(rmse);
+    const remaining: usize = if (converged and max_iter > iterations_used) max_iter - iterations_used else 0;
+    st.scalars[t_letter] = @floatFromInt(remaining);
 
     return .next;
 }
