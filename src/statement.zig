@@ -72,6 +72,10 @@ const STD_INPUT_HANDLE: i32 = -10;
 const ENABLE_LINE_INPUT: u32 = 0x0002;
 const ENABLE_ECHO_INPUT: u32 = 0x0004;
 const KEY_EVENT: u16 = 0x0001;
+const VK_UP: u16 = 0x26;
+const VK_DOWN: u16 = 0x28;
+const VK_PRIOR: u16 = 0x21;
+const VK_NEXT: u16 = 0x22;
 
 const KEY_EVENT_RECORD = extern struct {
     bKeyDown: i32,
@@ -235,6 +239,46 @@ fn blockingReadKeyCode() f32 {
     }
 }
 
+/// Низкоуровневое чтение клавиши для MENU: возвращает и виртуальный
+/// код клавиши (для стрелок/PgUp/PgDn), и ASCII-код (для Enter/Esc).
+const MenuKey = struct { vk: u16, ascii: u8 };
+
+fn readMenuKey() MenuKey {
+    if (builtin.os.tag != .windows) return .{ .vk = 0, .ascii = 0 };
+    const handle = GetStdHandle(STD_INPUT_HANDLE);
+    var original_mode: u32 = 0;
+    _ = GetConsoleMode(handle, &original_mode);
+    const raw_mode = original_mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+    _ = SetConsoleMode(handle, raw_mode);
+    defer _ = SetConsoleMode(handle, original_mode);
+
+    var records: [1]INPUT_RECORD = undefined;
+    while (true) {
+        var read_count: u32 = 0;
+        if (ReadConsoleInputA(handle, &records, 1, &read_count) == 0) return .{ .vk = 0, .ascii = 0 };
+        const rec = records[0];
+        if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
+            return .{ .vk = rec.Event.KeyEvent.wVirtualKeyCode, .ascii = rec.Event.KeyEvent.uChar.AsciiChar };
+        }
+    }
+}
+
+/// Сбрасывает все накопившиеся в очереди события клавиатуры консоли
+/// (например, "фантомное" нажатие Enter, которым была запущена сама
+/// программа). Вызывается один раз перед началом интерактивного цикла MENU.
+fn drainPendingInput() void {
+    if (builtin.os.tag != .windows) return;
+    const handle = GetStdHandle(STD_INPUT_HANDLE);
+    var records: [16]INPUT_RECORD = undefined;
+    while (true) {
+        var peek_count: u32 = 0;
+        if (PeekConsoleInputA(handle, &records, records.len, &peek_count) == 0 or peek_count == 0) break;
+        var read_count: u32 = 0;
+        if (ReadConsoleInputA(handle, &records, peek_count, &read_count) == 0) break;
+        if (read_count < records.len) break;
+    }
+}
+
 pub fn execute(
     allocator: std.mem.Allocator,
     line: []const u8,
@@ -304,6 +348,9 @@ pub fn execute(
     }
     if (eq(name, "DATA")) {
         return execData(a, toks[1..], st, prog);
+    }
+    if (eq(name, "MENU")) {
+        return execMenu(a, toks[1..], st, stdout);
     }
     if (eq(name, "LENF")) {
         return execLenf(a, toks[1..], st, io);
@@ -429,6 +476,107 @@ fn execWait(
         }
         st.scalars[letter] = final_code;
     }
+    return .next;
+}
+
+/// MENU N;L;S;C;F — многостраничное текстовое меню. N - число элементов
+/// (из строкового массива), L - элементов на странице, S/C - строка/столбец
+/// левого верхнего угла, F - переменная с результатом (номер выбранного
+/// элемента, 0 при Esc, <0 при ошибке параметров). Стрелки/PgUp/PgDn/Enter/Esc.
+fn execMenu(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+    stdout: anytype,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(5, args);
+
+    var np = expr_mod.Parser.init(allocator, parts[0]);
+    const nnode = try np.parseExpr();
+    const nval = try expr_mod.evaluate(nnode, st, .{});
+    var lp = expr_mod.Parser.init(allocator, parts[1]);
+    const lnode = try lp.parseExpr();
+    const lval = try expr_mod.evaluate(lnode, st, .{});
+    var sp = expr_mod.Parser.init(allocator, parts[2]);
+    const snode = try sp.parseExpr();
+    const sval = try expr_mod.evaluate(snode, st, .{});
+    var cp = expr_mod.Parser.init(allocator, parts[3]);
+    const cnode = try cp.parseExpr();
+    const cval = try expr_mod.evaluate(cnode, st, .{});
+    const f_letter = try singleLetterFromTokens(parts[4]);
+
+    if (nval < 1 or lval < 1) {
+        st.scalars[f_letter] = -1.0;
+        return .next;
+    }
+    const n: usize = @intFromFloat(nval);
+    const l: usize = @intFromFloat(lval);
+    const s_row: usize = @intFromFloat(sval);
+    const c_col: usize = @intFromFloat(cval);
+
+    if (st.static_strings.len == 0 or n > st.static_strings.len) {
+        st.scalars[f_letter] = -1.0;
+        return .next;
+    }
+
+    const total_pages = (n + l - 1) / l;
+    var selection: usize = st.last_menu_selection;
+    if (selection < 1 or selection > n) selection = 1;
+
+    const menu_width: usize = 40;
+    var space_buf: [80]u8 = undefined;
+    @memset(&space_buf, ' ');
+
+    drainPendingInput();
+
+    var result: f32 = 0.0;
+    while (true) {
+        const page_index = (selection - 1) / l;
+        const page_start = page_index * l + 1;
+        const page_end = @min(page_start + l - 1, n);
+
+        var row = s_row;
+        var item = page_start;
+        while (item <= page_end) : (item += 1) {
+            const bytes = st.static_strings[item - 1][0..st.static_strings_lens[item - 1]];
+            stdout.print("\x1B[{d};{d}H", .{ row, c_col }) catch {};
+            const is_selected = item == selection;
+            if (is_selected) stdout.print("\x1B[7m", .{}) catch {};
+            stdout.print("{s}", .{bytes}) catch {};
+            if (bytes.len < menu_width) {
+                stdout.print("{s}", .{space_buf[0 .. menu_width - bytes.len]}) catch {};
+            }
+            if (is_selected) stdout.print("\x1B[0m", .{}) catch {};
+            row += 1;
+        }
+        stdout.flush() catch {};
+
+        const key = readMenuKey();
+        if (key.ascii == 13) {
+            result = @floatFromInt(selection);
+            break;
+        }
+        if (key.ascii == 27) {
+            result = 0.0;
+            break;
+        }
+        if (key.vk == VK_UP) {
+            selection = if (selection <= 1) n else selection - 1;
+        } else if (key.vk == VK_DOWN) {
+            selection = if (selection >= n) 1 else selection + 1;
+        } else if (key.vk == VK_PRIOR) {
+            const cur_page = (selection - 1) / l;
+            const new_page = if (cur_page == 0) total_pages - 1 else cur_page - 1;
+            selection = new_page * l + 1;
+        } else if (key.vk == VK_NEXT) {
+            const cur_page = (selection - 1) / l;
+            const new_page = (cur_page + 1) % total_pages;
+            selection = new_page * l + 1;
+        }
+    }
+
+    st.last_menu_selection = selection;
+    st.scalars[f_letter] = result;
     return .next;
 }
 

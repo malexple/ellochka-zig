@@ -1,0 +1,42 @@
+! Тест MENU (многостраничное меню, N=6, L=3 на стр.)
+CLSC
+SIZE 6
+DATA 1;6;@items
+
+CSIM 2
+STRO 1
+STLB 1
+LIST 'Управление: стрелки, PgUp/PgDn, Enter, Esc'
+CSIM 7
+
+MENU 6;3;5;10;P
+
+STRO 12
+STLB 1
+ESLI P == 0; @cancelled
+LIST 'Вы выбрали пункт номер: '; P; ' -> '; $P
+GOTO @after
+
+@cancelled
+LIST 'Выбор отменён (Esc)'
+
+@after
+STRO 14
+STLB 1
+LIST 'Все пункты меню:'
+I=1
+@printloop
+STLB 1
+LIST I; ': '; $I
+INCR I
+ESLI I <= 6; @printloop
+
+EXIT
+
+@items
+Раздел графики
+Раздел файлов
+Математика
+Игры
+Настройки
+Выход
