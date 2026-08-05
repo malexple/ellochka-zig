@@ -1,0 +1,89 @@
+! Тест ESLI, %-функций, DLIN, FIND
+CLSC
+CSIM 2
+LIST 'ТЕСТ ESLI/%-ФУНКЦИЙ/DLIN/FIND'
+CSIM 7
+LIST ''
+
+! Диапазон включительно {Y,Z}
+X=15
+ESLI X == {10,20}; @inrange
+LIST 'FAIL: 15 должно быть в [10,20]'
+GOTO @after1
+@inrange
+LIST 'OK: 15 в [10,20] включительно'
+@after1
+
+! Диапазон исключая границы }Y,Z{
+X=10
+ESLI X == }10,20{ @exclhit
+LIST 'OK: 10 не входит в (10,20) откр.'
+GOTO @after2
+@exclhit
+LIST 'FAIL: 10 не должно быть в откр.'
+@after2
+
+! |= диапазон (не входит в [10,20])
+X=50
+ESLI X |= {10,20} @ok3
+LIST 'FAIL: 50 должно быть not-in'
+GOTO @after3
+@ok3
+LIST 'OK: 50 не входит в [10,20]'
+@after3
+
+! Сравнение строк
+SIZE 10
+$0='Privet'
+ESLI $0=='Privet' @streq
+LIST 'FAIL: строки должны быть равны'
+GOTO @after4
+@streq
+LIST 'OK: $0 равно Privet'
+@after4
+
+ESLI $0|='Mir' @strne
+LIST 'FAIL: строки не равны, не сработало'
+GOTO @after5
+@strne
+LIST 'OK: $0 не равно Mir'
+@after5
+
+! DLIN
+DLIN $0;L
+LIST 'Длина $0 (Privet): '; L
+
+! FIND подстрока
+$0='Hello World'
+FIND $0;'World';1;N
+LIST 'Позиция World: '; N
+
+FIND $0;'xyz';1;N
+LIST 'Позиция xyz (не найдено): '; N
+
+! FIND код символа (W = 87)
+FIND $0;87;1;N
+LIST 'Позиция кода 87 (W): '; N
+
+! %MID
+I=1
+$I='Hello World'
+$0=%MID($I,7,5)
+LIST '%MID(...,7,5) = '; $0
+
+! %CHR
+$0=%CHR(3,65)
+LIST '%CHR(3,65) = '; $0
+
+! %CHR с N<=0 (пустая строка)
+$0='X'+%CHR(0,65)+'Y'
+LIST 'CHR(0,S) пусто: '; $0
+
+! %DATE / %TIME
+$0=%DATE
+LIST 'Дата: '; $0
+$0=%TIME
+LIST 'Время: '; $0
+
+CSIM 7
+EXIT

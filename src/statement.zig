@@ -1,5 +1,6 @@
 //! src/statement.zig
 const std = @import("std");
+const builtin = @import("builtin");
 const lexer = @import("lexer.zig");
 const expr_mod = @import("expr.zig");
 const state_mod = @import("state.zig");
@@ -27,8 +28,7 @@ fn tokenizeLine(allocator: std.mem.Allocator, line: []const u8) ![]lexer.Token {
 }
 
 /// Если токен обозначает цифру 0-9 или букву A-Z (регистронезависимо),
-/// возвращает этот символ в верхнем регистре / как цифру. Используется
-/// для разбора конструкций `$0`..`$9` и `$A`..`$Z` после токена `.dollar`.
+/// возвращает этот символ. Используется для разбора `$0`..`$9` и `$A`..`$Z`.
 fn dollarTargetChar(tok: lexer.Token) ?u8 {
     if (tok.kind == .number and tok.text.len == 1 and tok.text[0] >= '0' and tok.text[0] <= '9') {
         return tok.text[0];
@@ -40,6 +40,18 @@ fn dollarTargetChar(tok: lexer.Token) ?u8 {
     return null;
 }
 
+/// Резолвит "строковый операнд": либо строковую константу (1 токен),
+/// либо $-переменную (2 токена: dollar + цифра/буква). Используется в
+/// ESLI (сравнение строк), DLIN, FIND, %MID.
+fn resolveStringOperand(tokens: []lexer.Token, st: *InterpreterState) errors.EllochkaError![]const u8 {
+    if (tokens.len == 1 and tokens[0].kind == .string_literal) return tokens[0].text;
+    if (tokens.len == 2 and tokens[0].kind == .dollar) {
+        const ch = dollarTargetChar(tokens[1]) orelse return errors.ParseError.InvalidVariableName;
+        return st.resolveStringBytes(ch);
+    }
+    return errors.ParseError.InvalidStatement;
+}
+
 /// Форматирует f32 в строку без лишних хвостовых нулей: 5.0 -> "5", 5.5 -> "5.5".
 fn formatScalar(buf: []u8, val: f32) []const u8 {
     if (val == @trunc(val) and @abs(val) < 1.0e15) {
@@ -47,6 +59,103 @@ fn formatScalar(buf: []u8, val: f32) []const u8 {
         return std.fmt.bufPrint(buf, "{d}", .{i}) catch "";
     }
     return std.fmt.bufPrint(buf, "{d}", .{val}) catch "";
+}
+
+// --- %DATE / %TIME ---------------------------------------------------------
+
+const SYSTEMTIME = extern struct {
+    wYear: u16,
+    wMonth: u16,
+    wDayOfWeek: u16,
+    wDay: u16,
+    wHour: u16,
+    wMinute: u16,
+    wSecond: u16,
+    wMilliseconds: u16,
+};
+
+extern "kernel32" fn GetLocalTime(lpSystemTime: *SYSTEMTIME) callconv(.winapi) void;
+
+/// Дописывает в буфер текущую локальную дату в формате dd/mm/yyyy.
+/// На Windows берётся реальное локальное время через Win32 GetLocalTime
+/// (соответствует поведению оригинального DOS-интерпретатора). На других
+/// платформах — фолбэк через UTC (std.time.epoch).
+fn appendDateString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8)) errors.EllochkaError!void {
+    var day: u16 = 1;
+    var month: u16 = 1;
+    var year: u16 = 1970;
+    if (builtin.os.tag == .windows) {
+        var st: SYSTEMTIME = undefined;
+        GetLocalTime(&st);
+        day = st.wDay;
+        month = st.wMonth;
+        year = st.wYear;
+    } else {
+        const secs: u64 = @intCast(std.time.timestamp());
+        const epoch_secs = std.time.epoch.EpochSeconds{ .secs = secs };
+        const epoch_day = epoch_secs.getEpochDay();
+        const yd = epoch_day.calculateYearDay();
+        const md = yd.calculateMonthDay();
+        year = yd.year;
+        month = @intCast(md.month.numeric());
+        day = @as(u16, md.day_index) + 1;
+    }
+    var tmp: [16]u8 = undefined;
+    const s = std.fmt.bufPrint(&tmp, "{d:0>2}/{d:0>2}/{d:0>4}", .{ day, month, year }) catch return errors.RuntimeError.MemoryAllocationFailed;
+    buf.appendSlice(allocator, s) catch return errors.RuntimeError.MemoryAllocationFailed;
+}
+
+/// Дописывает в буфер текущее локальное время в формате hh:mm:ss.
+fn appendTimeString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8)) errors.EllochkaError!void {
+    var hour: u16 = 0;
+    var minute: u16 = 0;
+    var second: u16 = 0;
+    if (builtin.os.tag == .windows) {
+        var st: SYSTEMTIME = undefined;
+        GetLocalTime(&st);
+        hour = st.wHour;
+        minute = st.wMinute;
+        second = st.wSecond;
+    } else {
+        const secs: u64 = @intCast(std.time.timestamp());
+        const epoch_secs = std.time.epoch.EpochSeconds{ .secs = secs };
+        const day_secs = epoch_secs.getDaySeconds();
+        hour = day_secs.getHoursIntoDay();
+        minute = day_secs.getMinutesIntoHour();
+        second = day_secs.getSecondsIntoMinute();
+    }
+    var tmp: [16]u8 = undefined;
+    const s = std.fmt.bufPrint(&tmp, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hour, minute, second }) catch return errors.RuntimeError.MemoryAllocationFailed;
+    buf.appendSlice(allocator, s) catch return errors.RuntimeError.MemoryAllocationFailed;
+}
+
+/// Разбирает "(arg1,arg2,...,argN)" на N срезов токенов по верхнеуровневым
+/// запятым (учитывая вложенные скобки). seg должен начинаться с '(' и
+/// заканчиваться на ')'.
+fn parseArgsInParens(comptime n: usize, seg: []lexer.Token) errors.EllochkaError![n][]lexer.Token {
+    if (seg.len < 2 or seg[0].kind != .lparen or seg[seg.len - 1].kind != .rparen) {
+        return errors.ParseError.InvalidStatement;
+    }
+    const inner = seg[1 .. seg.len - 1];
+    var parts: [n][]lexer.Token = undefined;
+    var start: usize = 0;
+    var part_idx: usize = 0;
+    var depth: usize = 0;
+    var i: usize = 0;
+    while (i <= inner.len) {
+        if (i == inner.len or (inner[i].kind == .comma and depth == 0)) {
+            if (part_idx >= n) return errors.ParseError.InvalidStatement;
+            parts[part_idx] = inner[start..i];
+            part_idx += 1;
+            start = i + 1;
+        } else {
+            if (inner[i].kind == .lparen) depth += 1;
+            if (inner[i].kind == .rparen) depth -= 1;
+        }
+        i += 1;
+    }
+    if (part_idx != n) return errors.ParseError.InvalidStatement;
+    return parts;
 }
 
 pub fn execute(
@@ -94,6 +203,12 @@ pub fn execute(
     }
     if (eq(name, "DECR")) {
         return execIncrDecr(toks[1..], st, -1.0);
+    }
+    if (eq(name, "DLIN")) {
+        return execDlin(toks[1..], st);
+    }
+    if (eq(name, "FIND")) {
+        return execFind(a, toks[1..], st);
     }
 
     if (eq(name, "RADI")) { st.angle_mode = .radians; return .next; }
@@ -163,6 +278,98 @@ fn execIncrDecr(
     }
     const letter = InterpreterState.letterIndex(args[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
     st.scalars[letter] += delta;
+    return .next;
+}
+
+/// DLIN P;L — определение длины текстовой переменной P, результат в L.
+fn execDlin(
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    var semi: ?usize = null;
+    for (args, 0..) |t, i| {
+        if (t.kind == .semicolon) { semi = i; break; }
+    }
+    const sep = semi orelse return errors.ParseError.InvalidStatement;
+    const p_tokens = args[0..sep];
+    const l_tokens = args[sep + 1 ..];
+    const bytes = try resolveStringOperand(p_tokens, st);
+    if (l_tokens.len != 1 or l_tokens[0].kind != .identifier or l_tokens[0].text.len != 1) {
+        return errors.ParseError.InvalidStatement;
+    }
+    const letter = InterpreterState.letterIndex(l_tokens[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
+    st.scalars[letter] = @floatFromInt(bytes.len);
+    return .next;
+}
+
+/// FIND P;S;I;N — поиск подстроки S (или кода символа C) в P начиная
+/// с позиции I (1-based), результат (1-based позиция или 0) в N.
+fn execFind(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    var parts: [4][]lexer.Token = undefined;
+    var start: usize = 0;
+    var part_idx: usize = 0;
+    var i: usize = 0;
+    while (i <= args.len) {
+        if (i == args.len or args[i].kind == .semicolon) {
+            if (part_idx >= 4) return errors.ParseError.InvalidStatement;
+            parts[part_idx] = args[start..i];
+            part_idx += 1;
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if (part_idx != 4) return errors.ParseError.InvalidStatement;
+
+    const p_tokens = parts[0];
+    const s_tokens = parts[1];
+    const i_tokens = parts[2];
+    const n_tokens = parts[3];
+
+    const haystack = try resolveStringOperand(p_tokens, st);
+
+    var ip = expr_mod.Parser.init(allocator, i_tokens);
+    const inode = try ip.parseExpr();
+    const ival = try expr_mod.evaluate(inode, st, .{});
+    if (ival < 1) return errors.RuntimeError.IndexOutOfBounds;
+    const start_pos: usize = @intFromFloat(ival);
+
+    if (n_tokens.len != 1 or n_tokens[0].kind != .identifier or n_tokens[0].text.len != 1) {
+        return errors.ParseError.InvalidStatement;
+    }
+    const n_letter = InterpreterState.letterIndex(n_tokens[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
+
+    var found_pos: usize = 0;
+    const is_string_mode = s_tokens.len >= 1 and (s_tokens[0].kind == .string_literal or s_tokens[0].kind == .dollar);
+
+    if (start_pos == 0 or start_pos > haystack.len + 1) {
+        st.scalars[n_letter] = 0.0;
+        return .next;
+    }
+
+    if (is_string_mode) {
+        const needle = try resolveStringOperand(s_tokens, st);
+        if (needle.len > 0 and start_pos - 1 <= haystack.len) {
+            const search_area = haystack[start_pos - 1 ..];
+            if (std.mem.indexOf(u8, search_area, needle)) |off| {
+                found_pos = start_pos + off;
+            }
+        }
+    } else {
+        var sp = expr_mod.Parser.init(allocator, s_tokens);
+        const snode = try sp.parseExpr();
+        const sval = try expr_mod.evaluate(snode, st, .{});
+        const code: u8 = @intFromFloat(std.math.clamp(sval, 0.0, 255.0));
+        var j: usize = start_pos - 1;
+        while (j < haystack.len) : (j += 1) {
+            if (haystack[j] == code) { found_pos = j + 1; break; }
+        }
+    }
+
+    st.scalars[n_letter] = @floatFromInt(found_pos);
     return .next;
 }
 
@@ -355,43 +562,127 @@ fn execGoto(
     return .{ .jump = @intCast(target) };
 }
 
+/// Разбирает и выполняет ESLI. Поддерживает три режима:
+///  - числовой:    ESLI X >> Y; C          (';' обязательна перед C)
+///  - диапазон:    ESLI X == {Y,Z} C       (';' перед C не используется)
+///                 ESLI X |= }Y,Z{ C
+///  - строковый:   ESLI $P == 'текст' C    (только ==/|=, ';' не используется)
+/// Здесь %% и ** из документации — не буквальные токены, а метасимволы,
+/// означающие "один из шести операторов сравнения"; различие режимов
+/// определяется тем, что стоит сразу после оператора: '{'/'}' -> диапазон,
+/// строковая константа/$-переменная -> строковый режим, иначе -> числовой.
 fn execEsli(
     allocator: std.mem.Allocator,
     args: []lexer.Token,
     st: *InterpreterState,
     prog: *const Program,
 ) errors.EllochkaError!ExecResult {
-    var semi_pos: ?usize = null;
-    for (args, 0..) |t, i| {
-        if (t.kind == .semicolon) { semi_pos = i; break; }
-    }
-    const sep = semi_pos orelse return errors.ParseError.InvalidStatement;
-    const cond_tokens = args[0..sep];
-    const goto_tokens = args[sep + 1 ..];
-
     var op_idx: ?usize = null;
-    for (cond_tokens, 0..) |t, i| {
+    for (args, 0..) |t, i| {
         switch (t.kind) {
             .gt_gt, .lt_lt, .gt_eq, .lt_eq, .eq_eq, .pipe_eq => { op_idx = i; break; },
             else => {},
         }
     }
     const oi = op_idx orelse return errors.ParseError.InvalidStatement;
-    var lp = expr_mod.Parser.init(allocator, cond_tokens[0..oi]);
-    const lhs_node = try lp.parseExpr();
-    const lhs_val = try expr_mod.evaluate(lhs_node, st, .{});
+    const lhs_tokens = args[0..oi];
+    const op = args[oi].kind;
+    var idx: usize = oi + 1;
 
-    var rp = expr_mod.Parser.init(allocator, cond_tokens[oi + 1 ..]);
-    const rhs_node = try rp.parseExpr();
-    const rhs_val = try expr_mod.evaluate(rhs_node, st, .{});
+    // Режим диапазона: сразу после оператора стоит '{' или '}'.
+    if (idx < args.len and (args[idx].kind == .lbrace or args[idx].kind == .rbrace)) {
+        const inclusive = args[idx].kind == .lbrace;
+        const close_kind: lexer.TokenType = if (inclusive) .rbrace else .lbrace;
+        idx += 1;
+        const range_start = idx;
+        var comma_pos: ?usize = null;
+        var j = idx;
+        while (j < args.len and args[j].kind != close_kind) {
+            if (args[j].kind == .comma and comma_pos == null) comma_pos = j;
+            j += 1;
+        }
+        if (j >= args.len or comma_pos == null) return errors.ParseError.InvalidStatement;
+        const cp = comma_pos.?;
+        const y_tokens = args[range_start..cp];
+        const z_tokens = args[cp + 1 .. j];
+        idx = j + 1;
 
-    const cond_true = switch (cond_tokens[oi].kind) {
-        .gt_gt => lhs_val > rhs_val,
-        .lt_lt => lhs_val < rhs_val,
-        .gt_eq => lhs_val >= rhs_val,
-        .lt_eq => lhs_val <= rhs_val,
-        .eq_eq => lhs_val == rhs_val,
-        .pipe_eq => lhs_val != rhs_val,
+        var lp = expr_mod.Parser.init(allocator, lhs_tokens);
+        const lnode = try lp.parseExpr();
+        const xval = try expr_mod.evaluate(lnode, st, .{});
+        var yp = expr_mod.Parser.init(allocator, y_tokens);
+        const ynode = try yp.parseExpr();
+        const yval = try expr_mod.evaluate(ynode, st, .{});
+        var zp = expr_mod.Parser.init(allocator, z_tokens);
+        const znode = try zp.parseExpr();
+        const zval = try expr_mod.evaluate(znode, st, .{});
+
+        const in_range = if (inclusive) (xval >= yval and xval <= zval) else (xval > yval and xval < zval);
+        const cond_true = switch (op) {
+            .eq_eq => in_range,
+            .pipe_eq => !in_range,
+            else => return errors.ParseError.InvalidStatement,
+        };
+
+        if (idx < args.len and args[idx].kind == .semicolon) idx += 1;
+        const goto_tokens = args[idx..];
+        if (!cond_true) return .next;
+        return execGoto(allocator, goto_tokens, st, prog);
+    }
+
+    // Режим сравнения строк: LHS начинается с '$', либо RHS - строка/$var.
+    const lhs_is_dollar = lhs_tokens.len >= 1 and lhs_tokens[0].kind == .dollar;
+    const rhs_is_string = idx < args.len and (args[idx].kind == .string_literal or args[idx].kind == .dollar);
+
+    if (lhs_is_dollar or rhs_is_string) {
+        if (op != .eq_eq and op != .pipe_eq) return errors.ParseError.InvalidStatement;
+        const lhs_bytes = try resolveStringOperand(lhs_tokens, st);
+
+        var rhs_len: usize = 0;
+        if (idx < args.len and args[idx].kind == .string_literal) {
+            rhs_len = 1;
+        } else if (idx < args.len and args[idx].kind == .dollar) {
+            rhs_len = 2;
+        } else {
+            return errors.ParseError.InvalidStatement;
+        }
+        const rhs_tokens = args[idx .. idx + rhs_len];
+        const rhs_bytes = try resolveStringOperand(rhs_tokens, st);
+        idx += rhs_len;
+
+        const are_equal = std.mem.eql(u8, lhs_bytes, rhs_bytes);
+        const cond_true = if (op == .eq_eq) are_equal else !are_equal;
+
+        if (idx < args.len and args[idx].kind == .semicolon) idx += 1;
+        const goto_tokens = args[idx..];
+        if (!cond_true) return .next;
+        return execGoto(allocator, goto_tokens, st, prog);
+    }
+
+    // Числовой режим: требуется ';' перед целью перехода.
+    var lp = expr_mod.Parser.init(allocator, lhs_tokens);
+    const lnode = try lp.parseExpr();
+    const lval = try expr_mod.evaluate(lnode, st, .{});
+
+    var semi_pos: ?usize = null;
+    var k = idx;
+    while (k < args.len) {
+        if (args[k].kind == .semicolon) { semi_pos = k; break; }
+        k += 1;
+    }
+    const sep = semi_pos orelse return errors.ParseError.InvalidStatement;
+    var rp = expr_mod.Parser.init(allocator, args[idx..sep]);
+    const rnode = try rp.parseExpr();
+    const rval = try expr_mod.evaluate(rnode, st, .{});
+    const goto_tokens = args[sep + 1 ..];
+
+    const cond_true = switch (op) {
+        .gt_gt => lval > rval,
+        .lt_lt => lval < rval,
+        .gt_eq => lval >= rval,
+        .lt_eq => lval <= rval,
+        .eq_eq => lval == rval,
+        .pipe_eq => lval != rval,
         else => unreachable,
     };
 
@@ -606,7 +897,8 @@ fn execDollarStatement(
 }
 
 /// Один компонент конкатенации: строковая константа, ссылка на текстовую
-/// переменную ($0-$9 / $A-$Z) или простая переменная (число -> строка).
+/// переменную ($0-$9 / $A-$Z), простая переменная (число -> строка) или
+/// строковая функция %MID/%CHR/%DATE/%TIME.
 fn appendStringComponent(
     allocator: std.mem.Allocator,
     buf: *std.ArrayListUnmanaged(u8),
@@ -614,18 +906,70 @@ fn appendStringComponent(
     st: *InterpreterState,
 ) errors.EllochkaError!void {
     if (seg.len == 0) return errors.ParseError.InvalidStatement;
+
     if (seg.len == 1 and seg[0].kind == .string_literal) {
         buf.appendSlice(allocator, seg[0].text) catch return errors.RuntimeError.MemoryAllocationFailed;
         return;
     }
+
     if (seg.len == 2 and seg[0].kind == .dollar) {
-        if (dollarTargetChar(seg[1])) |ch| {
-            const bytes = try st.resolveStringBytes(ch);
-            buf.appendSlice(allocator, bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
+        const bytes = try resolveStringOperand(seg, st);
+        buf.appendSlice(allocator, bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
+        return;
+    }
+
+    if (seg.len >= 2 and seg[0].kind == .percent and seg[1].kind == .identifier) {
+        const fname = seg[1].text;
+        if (eq(fname, "DATE")) {
+            try appendDateString(allocator, buf);
             return;
         }
-        return errors.ParseError.InvalidVariableName;
+        if (eq(fname, "TIME")) {
+            try appendTimeString(allocator, buf);
+            return;
+        }
+        if (eq(fname, "MID")) {
+            const parts = try parseArgsInParens(3, seg[2..]);
+            const p_bytes = try resolveStringOperand(parts[0], st);
+            var ip = expr_mod.Parser.init(allocator, parts[1]);
+            const inode = try ip.parseExpr();
+            const ival = try expr_mod.evaluate(inode, st, .{});
+            var np = expr_mod.Parser.init(allocator, parts[2]);
+            const nnode = try np.parseExpr();
+            const nval = try expr_mod.evaluate(nnode, st, .{});
+
+            if (ival < 1) return errors.RuntimeError.IndexOutOfBounds;
+            const start_idx: usize = @intFromFloat(ival);
+            if (start_idx > p_bytes.len) return errors.RuntimeError.IndexOutOfBounds;
+            const count_i: i64 = @intFromFloat(nval);
+            const count: usize = if (count_i <= 0) 0 else @intCast(count_i);
+            const zig_start = start_idx - 1;
+            const zig_end = @min(p_bytes.len, zig_start + count);
+            buf.appendSlice(allocator, p_bytes[zig_start..zig_end]) catch return errors.RuntimeError.MemoryAllocationFailed;
+            return;
+        }
+        if (eq(fname, "CHR")) {
+            const parts = try parseArgsInParens(2, seg[2..]);
+            var np = expr_mod.Parser.init(allocator, parts[0]);
+            const nnode = try np.parseExpr();
+            const nval = try expr_mod.evaluate(nnode, st, .{});
+            var sp = expr_mod.Parser.init(allocator, parts[1]);
+            const snode = try sp.parseExpr();
+            const sval = try expr_mod.evaluate(snode, st, .{});
+
+            const n_int: i64 = @intFromFloat(nval);
+            if (n_int <= 0) return;
+            const count: usize = @intCast(n_int);
+            const char_code: u8 = @intFromFloat(std.math.clamp(sval, 0.0, 255.0));
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                buf.append(allocator, char_code) catch return errors.RuntimeError.MemoryAllocationFailed;
+            }
+            return;
+        }
+        return errors.ParseError.ExtensionNotImplemented;
     }
+
     if (seg.len == 1 and seg[0].kind == .identifier and seg[0].text.len == 1) {
         const letter = InterpreterState.letterIndex(seg[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
         var numbuf: [64]u8 = undefined;
@@ -638,8 +982,6 @@ fn appendStringComponent(
 
 /// Токенизирует и вычисляет арифметическое выражение, хранящееся внутри
 /// текстовой переменной (оператор присваивания `A#$текст`, вариант 6).
-/// Ошибки разбора конвертируются в RuntimeError.InvalidExpressionInString;
-/// ошибки самого вычисления (деление на ноль и т.д.) передаются как есть.
 fn evalStringExpression(
     allocator: std.mem.Allocator,
     content: []const u8,
