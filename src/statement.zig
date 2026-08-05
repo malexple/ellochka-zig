@@ -487,6 +487,9 @@ pub fn execute(
     if (eq(name, "NTGR")) {
         return execNtgr(a, toks[1..], st);
     }
+    if (eq(name, "TRAN")) {
+        return execTran(a, toks[1..], st);
+    }
 
     if (name.len == 1 and InterpreterState.letterIndex(name[0]) != null) {
         return execAssignment(a, toks, st);
@@ -3134,6 +3137,168 @@ fn execNtgr(
 
     const result = sum * h;
     st.scalars[y_letter] = @floatCast(result);
+
+    return .next;
+}
+
+/// TRAN X;N;E;T;U - решение системы N нелинейных уравнений (N от 1
+/// до 9, тексты в $1..$N) методом Ньютона с численным Якобианом и
+/// backtracking line search (дробление шага при отсутствии убывания
+/// нормы невязок). X - массив неизвестных (вход: начальное
+/// приближение, выход: решение). T - остаток итераций (вход: лимит).
+/// U - 0 при успехе, иначе количество неудовлетворённых уравнений
+/// (в этом случае T=0).
+fn execTran(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(5, args);
+    const x_letter = try singleLetterFromTokens(parts[0]);
+
+    var np = expr_mod.Parser.init(allocator, parts[1]);
+    const nnode = try np.parseExpr();
+    const nval = try expr_mod.evaluate(nnode, st, .{});
+    if (nval < 1 or nval > 9) return errors.RuntimeError.MathDomainError;
+    const n: usize = @intFromFloat(nval);
+
+    var ep = expr_mod.Parser.init(allocator, parts[2]);
+    const enode = try ep.parseExpr();
+    const e_val_f32 = try expr_mod.evaluate(enode, st, .{});
+    const e_val: f64 = @floatCast(e_val_f32);
+
+    const t_letter = try singleLetterFromTokens(parts[3]);
+    const u_letter = try singleLetterFromTokens(parts[4]);
+
+    const max_iter: usize = @intFromFloat(st.scalars[t_letter]);
+
+    const xs = st.arrays1d[x_letter];
+    if (xs.len < n) return errors.RuntimeError.ArrayNotSized;
+
+    var x_cur = allocator.alloc(f64, n) catch return errors.RuntimeError.MemoryAllocationFailed;
+    for (0..n) |i| x_cur[i] = @floatCast(xs[i]);
+
+    var eq_texts = allocator.alloc([]const u8, n) catch return errors.RuntimeError.MemoryAllocationFailed;
+    for (0..n) |i| {
+        const ch: u8 = '1' + @as(u8, @intCast(i));
+        eq_texts[i] = try st.resolveStringBytes(ch);
+    }
+
+    var f_vec = allocator.alloc(f64, n) catch return errors.RuntimeError.MemoryAllocationFailed;
+
+    for (xs, 0..) |*v, i| {
+        if (i < n) v.* = @floatCast(x_cur[i]);
+    }
+    for (0..n) |r| {
+        const val = try evalStringExpression(allocator, eq_texts[r], st);
+        f_vec[r] = @floatCast(val);
+    }
+
+    var iterations_used: usize = 0;
+    var converged = false;
+
+    while (iterations_used < max_iter) {
+        var max_abs: f64 = 0.0;
+        for (f_vec) |v| max_abs = @max(max_abs, @abs(v));
+        if (max_abs < e_val) {
+            converged = true;
+            break;
+        }
+
+        var jac = allocator.alloc([]f64, n) catch return errors.RuntimeError.MemoryAllocationFailed;
+        for (0..n) |r| jac[r] = allocator.alloc(f64, n + 1) catch return errors.RuntimeError.MemoryAllocationFailed;
+
+        for (0..n) |j| {
+            const orig = x_cur[j];
+            const h = @max(1e-4, 1e-4 * @abs(orig));
+            x_cur[j] = orig + h;
+            for (xs, 0..) |*v, i| {
+                if (i < n) v.* = @floatCast(x_cur[i]);
+            }
+
+            for (0..n) |r| {
+                const val = try evalStringExpression(allocator, eq_texts[r], st);
+                jac[r][j] = (@as(f64, @floatCast(val)) - f_vec[r]) / h;
+            }
+
+            x_cur[j] = orig;
+        }
+        for (xs, 0..) |*v, i| {
+            if (i < n) v.* = @floatCast(x_cur[i]);
+        }
+
+        for (0..n) |r| jac[r][n] = -f_vec[r];
+
+        const delta = solveLinearSystemF64(allocator, n, jac) catch |err| {
+            if (err != errors.RuntimeError.MathDomainError) return err;
+            var bad_count: usize = 0;
+            for (f_vec) |v| {
+                if (@abs(v) >= e_val) bad_count += 1;
+            }
+            st.scalars[u_letter] = @floatFromInt(bad_count);
+            st.scalars[t_letter] = 0.0;
+            return .next;
+        };
+
+        var new_x = allocator.alloc(f64, n) catch return errors.RuntimeError.MemoryAllocationFailed;
+        var new_f = allocator.alloc(f64, n) catch return errors.RuntimeError.MemoryAllocationFailed;
+        var old_norm: f64 = 0.0;
+        for (f_vec) |v| old_norm += v * v;
+
+        var step: f64 = 1.0;
+        var accepted = false;
+        var attempt: usize = 0;
+        while (attempt < 20) : (attempt += 1) {
+            for (0..n) |k| new_x[k] = x_cur[k] + step * delta[k];
+            for (xs, 0..) |*v, i| {
+                if (i < n) v.* = @floatCast(new_x[i]);
+            }
+            var new_norm: f64 = 0.0;
+            for (0..n) |r| {
+                const val = try evalStringExpression(allocator, eq_texts[r], st);
+                new_f[r] = @floatCast(val);
+                new_norm += new_f[r] * new_f[r];
+            }
+            if (new_norm < old_norm) {
+                accepted = true;
+                break;
+            }
+            step /= 2.0;
+        }
+
+        if (!accepted) {
+            for (xs, 0..) |*v, i| {
+                if (i < n) v.* = @floatCast(x_cur[i]);
+            }
+            var bad_count: usize = 0;
+            for (f_vec) |v| {
+                if (@abs(v) >= e_val) bad_count += 1;
+            }
+            st.scalars[u_letter] = @floatFromInt(bad_count);
+            st.scalars[t_letter] = 0.0;
+            return .next;
+        }
+
+        @memcpy(x_cur, new_x);
+        @memcpy(f_vec, new_f);
+        for (xs, 0..) |*v, i| {
+            if (i < n) v.* = @floatCast(x_cur[i]);
+        }
+        iterations_used += 1;
+    }
+
+    if (converged) {
+        st.scalars[u_letter] = 0.0;
+        const remaining: usize = if (max_iter > iterations_used) max_iter - iterations_used else 0;
+        st.scalars[t_letter] = @floatFromInt(remaining);
+    } else {
+        var bad_count: usize = 0;
+        for (f_vec) |v| {
+            if (@abs(v) >= e_val) bad_count += 1;
+        }
+        st.scalars[u_letter] = @floatFromInt(bad_count);
+        st.scalars[t_letter] = 0.0;
+    }
 
     return .next;
 }
