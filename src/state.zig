@@ -212,8 +212,6 @@ pub const InterpreterState = struct {
 
     /// Полное присваивание содержимого текстовой переменной $0-$9 или $A-$Z
     /// (для $A-$Z — та же косвенная адресация, что и в resolveStringBytes).
-    /// Проверяет лимит длины 75 байт для static_strings (для $0-$9 лимит
-    /// 1024 проверяется на стороне statement.zig перед вызовом DynamicString.set).
     pub fn setStaticString(self: *InterpreterState, ch: u8, value: []const u8) errors.EllochkaError!void {
         const letter = letterIndex(ch) orelse return errors.ParseError.InvalidVariableName;
         if (self.static_strings.len == 0) return errors.RuntimeError.ArrayNotSized;
@@ -223,6 +221,18 @@ pub const InterpreterState = struct {
         if (index == 0 or index > self.static_strings.len) return errors.RuntimeError.IndexOutOfBounds;
         if (value.len > STATIC_STRING_LEN) return errors.RuntimeError.StringTooLong;
         const slot = index - 1;
+        @memcpy(self.static_strings[slot][0..value.len], value);
+        self.static_strings_lens[slot] = @intCast(value.len);
+    }
+
+    /// Прямая запись по АБСОЛЮТНОМУ числовому индексу (1-based), минуя
+    /// косвенную адресацию через скаляр. Используется оператором DATA,
+    /// который явно указывает диапазон индексов A..B.
+    pub fn setStaticStringByIndex(self: *InterpreterState, index_1based: usize, value: []const u8) errors.EllochkaError!void {
+        if (self.static_strings.len == 0) return errors.RuntimeError.ArrayNotSized;
+        if (index_1based == 0 or index_1based > self.static_strings.len) return errors.RuntimeError.IndexOutOfBounds;
+        if (value.len > STATIC_STRING_LEN) return errors.RuntimeError.StringTooLong;
+        const slot = index_1based - 1;
         @memcpy(self.static_strings[slot][0..value.len], value);
         self.static_strings_lens[slot] = @intCast(value.len);
     }

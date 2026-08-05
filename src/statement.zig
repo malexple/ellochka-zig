@@ -61,7 +61,7 @@ fn formatScalar(buf: []u8, val: f32) []const u8 {
     return std.fmt.bufPrint(buf, "{d}", .{val}) catch "";
 }
 
-// --- %DATE / %TIME ---------------------------------------------------------
+// --- Win32: время, консольная клавиатура ------------------------------------
 
 const SYSTEMTIME = extern struct {
     wYear: u16,
@@ -76,10 +76,37 @@ const SYSTEMTIME = extern struct {
 
 extern "kernel32" fn GetLocalTime(lpSystemTime: *SYSTEMTIME) callconv(.winapi) void;
 
+const STD_INPUT_HANDLE: i32 = -10;
+const ENABLE_LINE_INPUT: u32 = 0x0002;
+const ENABLE_ECHO_INPUT: u32 = 0x0004;
+const KEY_EVENT: u16 = 0x0001;
+
+const KEY_EVENT_RECORD = extern struct {
+    bKeyDown: i32,
+    wRepeatCount: u16,
+    wVirtualKeyCode: u16,
+    wVirtualScanCode: u16,
+    uChar: extern union {
+        UnicodeChar: u16,
+        AsciiChar: u8,
+    },
+    dwControlKeyState: u32,
+};
+
+const INPUT_RECORD = extern struct {
+    EventType: u16,
+    Event: extern union {
+        KeyEvent: KEY_EVENT_RECORD,
+    },
+};
+
+extern "kernel32" fn GetStdHandle(nStdHandle: i32) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn GetConsoleMode(hConsoleHandle: ?*anyopaque, lpMode: *u32) callconv(.winapi) i32;
+extern "kernel32" fn SetConsoleMode(hConsoleHandle: ?*anyopaque, dwMode: u32) callconv(.winapi) i32;
+extern "kernel32" fn PeekConsoleInputA(hConsoleInput: ?*anyopaque, lpBuffer: [*]INPUT_RECORD, nLength: u32, lpNumberOfEventsRead: *u32) callconv(.winapi) i32;
+extern "kernel32" fn ReadConsoleInputA(hConsoleInput: ?*anyopaque, lpBuffer: [*]INPUT_RECORD, nLength: u32, lpNumberOfEventsRead: *u32) callconv(.winapi) i32;
+
 /// Дописывает в буфер текущую локальную дату в формате dd/mm/yyyy.
-/// На Windows берётся реальное локальное время через Win32 GetLocalTime
-/// (соответствует поведению оригинального DOS-интерпретатора). На других
-/// платформах — фолбэк через UTC (std.time.epoch).
 fn appendDateString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8)) errors.EllochkaError!void {
     var day: u16 = 1;
     var month: u16 = 1;
@@ -158,6 +185,76 @@ fn parseArgsInParens(comptime n: usize, seg: []lexer.Token) errors.EllochkaError
     return parts;
 }
 
+/// Разбивает срез токенов на ровно n частей по верхнеуровневым ';'.
+fn splitBySemicolon(comptime n: usize, args: []lexer.Token) errors.EllochkaError![n][]lexer.Token {
+    var parts: [n][]lexer.Token = undefined;
+    var start: usize = 0;
+    var part_idx: usize = 0;
+    var i: usize = 0;
+    while (i <= args.len) {
+        if (i == args.len or args[i].kind == .semicolon) {
+            if (part_idx >= n) return errors.ParseError.InvalidStatement;
+            parts[part_idx] = args[start..i];
+            part_idx += 1;
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if (part_idx != n) return errors.ParseError.InvalidStatement;
+    return parts;
+}
+
+fn singleLetterFromTokens(tokens: []lexer.Token) errors.EllochkaError!u8 {
+    if (tokens.len != 1 or tokens[0].kind != .identifier or tokens[0].text.len != 1) {
+        return errors.ParseError.InvalidStatement;
+    }
+    return InterpreterState.letterIndex(tokens[0].text[0]) orelse errors.ParseError.InvalidVariableName;
+}
+
+/// Считывает одно событие клавиатуры (если оно есть в буфере, без блокировки).
+/// Возвращает null если событий нет, иначе код: ASCII (0-255) либо 256 для
+/// расширенных/управляющих клавиш без ASCII-представления.
+fn peekKeyCode() ?f32 {
+    if (builtin.os.tag != .windows) return null;
+    const handle = GetStdHandle(STD_INPUT_HANDLE);
+    var records: [1]INPUT_RECORD = undefined;
+    while (true) {
+        var peek_count: u32 = 0;
+        if (PeekConsoleInputA(handle, &records, 1, &peek_count) == 0 or peek_count == 0) return null;
+        var read_count: u32 = 0;
+        _ = ReadConsoleInputA(handle, &records, 1, &read_count);
+        const rec = records[0];
+        if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
+            const ascii = rec.Event.KeyEvent.uChar.AsciiChar;
+            return if (ascii != 0) @floatFromInt(ascii) else 256.0;
+        }
+        // Событие отжатия клавиши или иное — пропускаем, проверяем дальше.
+    }
+}
+
+/// Блокирующее ожидание одной клавиши в raw-режиме консоли (без Enter).
+/// Гарантированно восстанавливает исходный режим консоли перед выходом.
+fn blockingReadKeyCode() f32 {
+    if (builtin.os.tag != .windows) return 0.0;
+    const handle = GetStdHandle(STD_INPUT_HANDLE);
+    var original_mode: u32 = 0;
+    _ = GetConsoleMode(handle, &original_mode);
+    const raw_mode = original_mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+    _ = SetConsoleMode(handle, raw_mode);
+    defer _ = SetConsoleMode(handle, original_mode);
+
+    var records: [1]INPUT_RECORD = undefined;
+    while (true) {
+        var read_count: u32 = 0;
+        if (ReadConsoleInputA(handle, &records, 1, &read_count) == 0) return 0.0;
+        const rec = records[0];
+        if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
+            const ascii = rec.Event.KeyEvent.uChar.AsciiChar;
+            return if (ascii != 0) @floatFromInt(ascii) else 256.0;
+        }
+    }
+}
+
 pub fn execute(
     allocator: std.mem.Allocator,
     line: []const u8,
@@ -210,6 +307,24 @@ pub fn execute(
     if (eq(name, "FIND")) {
         return execFind(a, toks[1..], st);
     }
+    if (eq(name, "KEYS")) {
+        return execKeys(toks[1..], st);
+    }
+    if (eq(name, "WAIT")) {
+        return execWait(toks[1..], st);
+    }
+    if (eq(name, "SUMA")) {
+        return execSuma(toks[1..], st);
+    }
+    if (eq(name, "MINA")) {
+        return execMinMax(toks[1..], st, false);
+    }
+    if (eq(name, "MAXA")) {
+        return execMinMax(toks[1..], st, true);
+    }
+    if (eq(name, "DATA")) {
+        return execData(a, toks[1..], st, prog);
+    }
 
     if (eq(name, "RADI")) { st.angle_mode = .radians; return .next; }
     if (eq(name, "GRDS")) { st.angle_mode = .degrees; return .next; }
@@ -259,7 +374,6 @@ fn eq(a: []const u8, b: []const u8) bool {
 }
 
 /// Разбирает токен-число (например, "1", "2", "3") в u8-категорию.
-/// Используется для SIZE/UMEM/CURR/MEMC вида "<цифра><буква>".
 fn parseCategoryDigit(tok: lexer.Token) errors.EllochkaError!u8 {
     if (tok.kind != .number) return errors.ParseError.InvalidStatement;
     const val = std.fmt.parseInt(u32, tok.text, 10) catch return errors.ParseError.InvalidStatement;
@@ -281,6 +395,132 @@ fn execIncrDecr(
     return .next;
 }
 
+/// KEYS A — без блокировки: если в буфере есть событие клавиши, код в A,
+/// иначе 0. Работает через PeekConsoleInput/ReadConsoleInput (Windows).
+fn execKeys(
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const letter = try singleLetterFromTokens(args);
+    st.scalars[letter] = peekKeyCode() orelse 0.0;
+    return .next;
+}
+
+/// WAIT / WAIT A / WAIT A# — блокирующее ожидание любой клавиши без Enter
+/// (raw-режим консоли). Если указана переменная — код нажатой клавиши
+/// записывается в неё; '#' переводит символьный код в верхний регистр.
+fn execWait(
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    var target_letter: ?u8 = null;
+    var uppercase = false;
+    if (args.len >= 1) {
+        target_letter = try singleLetterFromTokens(args[0..1]);
+        if (args.len >= 2 and args[1].kind == .hash) uppercase = true;
+    }
+
+    const code = blockingReadKeyCode();
+
+    if (target_letter) |letter| {
+        var final_code = code;
+        if (uppercase and code >= 97.0 and code <= 122.0) {
+            final_code = code - 32.0;
+        }
+        st.scalars[letter] = final_code;
+    }
+    return .next;
+}
+
+/// SUMA D;S — сумма элементов одномерного массива D в скаляр S.
+fn execSuma(
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(2, args);
+    const d_letter = try singleLetterFromTokens(parts[0]);
+    const s_letter = try singleLetterFromTokens(parts[1]);
+    const arr = st.arrays1d[d_letter];
+    if (arr.len == 0) return errors.RuntimeError.ArrayNotSized;
+    var sum: f32 = 0.0;
+    for (arr) |v| sum += v;
+    st.scalars[s_letter] = sum;
+    return .next;
+}
+
+/// MINA D;I / MAXA D;I — индекс минимального/максимального элемента.
+/// При совпадении значений возвращается индекс ПЕРВОГО найденного.
+fn execMinMax(
+    args: []lexer.Token,
+    st: *InterpreterState,
+    want_max: bool,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(2, args);
+    const d_letter = try singleLetterFromTokens(parts[0]);
+    const i_letter = try singleLetterFromTokens(parts[1]);
+    const arr = st.arrays1d[d_letter];
+    if (arr.len == 0) return errors.RuntimeError.ArrayNotSized;
+    var best_idx: usize = 0;
+    var best_val = arr[0];
+    var i: usize = 1;
+    while (i < arr.len) : (i += 1) {
+        const v = arr[i];
+        const better = if (want_max) v > best_val else v < best_val;
+        if (better) {
+            best_val = v;
+            best_idx = i;
+        }
+    }
+    st.scalars[i_letter] = @floatFromInt(best_idx + 1);
+    return .next;
+}
+
+/// DATA A;B;C — заполнить элементы строкового массива в диапазоне [A,B]
+/// (прямая числовая индексация) строками программы, начиная со строки C
+/// (число) или со следующей строки после метки C (@label).
+fn execData(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+    prog: *const Program,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(3, args);
+    const a_tokens = parts[0];
+    const b_tokens = parts[1];
+    const c_tokens = parts[2];
+
+    var ap = expr_mod.Parser.init(allocator, a_tokens);
+    const anode = try ap.parseExpr();
+    const aval = try expr_mod.evaluate(anode, st, .{});
+    var bp = expr_mod.Parser.init(allocator, b_tokens);
+    const bnode = try bp.parseExpr();
+    const bval = try expr_mod.evaluate(bnode, st, .{});
+    if (aval < 1 or bval < aval) return errors.ParseError.InvalidStatement;
+    const start_idx: usize = @intFromFloat(aval);
+    const end_idx: usize = @intFromFloat(bval);
+
+    var current_line: usize = undefined;
+    if (c_tokens.len >= 1 and c_tokens[0].kind == .at) {
+        if (c_tokens.len < 2 or c_tokens[1].kind != .identifier) return errors.ParseError.InvalidStatement;
+        current_line = prog.resolveLabel(c_tokens[1].text) orelse return errors.RuntimeError.LabelNotFound;
+    } else {
+        var cp = expr_mod.Parser.init(allocator, c_tokens);
+        const cnode = try cp.parseExpr();
+        const cval = try expr_mod.evaluate(cnode, st, .{});
+        if (cval < 1) return errors.RuntimeError.LineOutOfRange;
+        current_line = @intFromFloat(cval);
+    }
+
+    var idx = start_idx;
+    while (idx <= end_idx) : (idx += 1) {
+        if (current_line > prog.lineCount()) return errors.RuntimeError.LineOutOfRange;
+        const raw = prog.getLine(current_line) orelse "";
+        try st.setStaticStringByIndex(idx, raw);
+        current_line += 1;
+    }
+    return .next;
+}
+
 /// DLIN P;L — определение длины текстовой переменной P, результат в L.
 fn execDlin(
     args: []lexer.Token,
@@ -294,10 +534,7 @@ fn execDlin(
     const p_tokens = args[0..sep];
     const l_tokens = args[sep + 1 ..];
     const bytes = try resolveStringOperand(p_tokens, st);
-    if (l_tokens.len != 1 or l_tokens[0].kind != .identifier or l_tokens[0].text.len != 1) {
-        return errors.ParseError.InvalidStatement;
-    }
-    const letter = InterpreterState.letterIndex(l_tokens[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
+    const letter = try singleLetterFromTokens(l_tokens);
     st.scalars[letter] = @floatFromInt(bytes.len);
     return .next;
 }
@@ -309,21 +546,7 @@ fn execFind(
     args: []lexer.Token,
     st: *InterpreterState,
 ) errors.EllochkaError!ExecResult {
-    var parts: [4][]lexer.Token = undefined;
-    var start: usize = 0;
-    var part_idx: usize = 0;
-    var i: usize = 0;
-    while (i <= args.len) {
-        if (i == args.len or args[i].kind == .semicolon) {
-            if (part_idx >= 4) return errors.ParseError.InvalidStatement;
-            parts[part_idx] = args[start..i];
-            part_idx += 1;
-            start = i + 1;
-        }
-        i += 1;
-    }
-    if (part_idx != 4) return errors.ParseError.InvalidStatement;
-
+    const parts = try splitBySemicolon(4, args);
     const p_tokens = parts[0];
     const s_tokens = parts[1];
     const i_tokens = parts[2];
@@ -337,10 +560,7 @@ fn execFind(
     if (ival < 1) return errors.RuntimeError.IndexOutOfBounds;
     const start_pos: usize = @intFromFloat(ival);
 
-    if (n_tokens.len != 1 or n_tokens[0].kind != .identifier or n_tokens[0].text.len != 1) {
-        return errors.ParseError.InvalidStatement;
-    }
-    const n_letter = InterpreterState.letterIndex(n_tokens[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
+    const n_letter = try singleLetterFromTokens(n_tokens);
 
     var found_pos: usize = 0;
     const is_string_mode = s_tokens.len >= 1 and (s_tokens[0].kind == .string_literal or s_tokens[0].kind == .dollar);
@@ -567,10 +787,6 @@ fn execGoto(
 ///  - диапазон:    ESLI X == {Y,Z} C       (';' перед C не используется)
 ///                 ESLI X |= }Y,Z{ C
 ///  - строковый:   ESLI $P == 'текст' C    (только ==/|=, ';' не используется)
-/// Здесь %% и ** из документации — не буквальные токены, а метасимволы,
-/// означающие "один из шести операторов сравнения"; различие режимов
-/// определяется тем, что стоит сразу после оператора: '{'/'}' -> диапазон,
-/// строковая константа/$-переменная -> строковый режим, иначе -> числовой.
 fn execEsli(
     allocator: std.mem.Allocator,
     args: []lexer.Token,
@@ -589,7 +805,6 @@ fn execEsli(
     const op = args[oi].kind;
     var idx: usize = oi + 1;
 
-    // Режим диапазона: сразу после оператора стоит '{' или '}'.
     if (idx < args.len and (args[idx].kind == .lbrace or args[idx].kind == .rbrace)) {
         const inclusive = args[idx].kind == .lbrace;
         const close_kind: lexer.TokenType = if (inclusive) .rbrace else .lbrace;
@@ -630,7 +845,6 @@ fn execEsli(
         return execGoto(allocator, goto_tokens, st, prog);
     }
 
-    // Режим сравнения строк: LHS начинается с '$', либо RHS - строка/$var.
     const lhs_is_dollar = lhs_tokens.len >= 1 and lhs_tokens[0].kind == .dollar;
     const rhs_is_string = idx < args.len and (args[idx].kind == .string_literal or args[idx].kind == .dollar);
 
@@ -659,7 +873,6 @@ fn execEsli(
         return execGoto(allocator, goto_tokens, st, prog);
     }
 
-    // Числовой режим: требуется ';' перед целью перехода.
     var lp = expr_mod.Parser.init(allocator, lhs_tokens);
     const lnode = try lp.parseExpr();
     const lval = try expr_mod.evaluate(lnode, st, .{});
@@ -826,9 +1039,6 @@ fn readSegment(
     return errors.ParseError.ExtensionNotImplemented;
 }
 
-/// Разбирает и выполняет присваивание текстовой переменной:
-/// $0 = ... / $A = ... (конкатенация через +), либо запись кода символа
-/// $?[индекс] = выражение. `toks[0]` обязан быть токеном `.dollar`.
 fn execDollarStatement(
     allocator: std.mem.Allocator,
     toks: []lexer.Token,
@@ -896,9 +1106,6 @@ fn execDollarStatement(
     return .next;
 }
 
-/// Один компонент конкатенации: строковая константа, ссылка на текстовую
-/// переменную ($0-$9 / $A-$Z), простая переменная (число -> строка) или
-/// строковая функция %MID/%CHR/%DATE/%TIME.
 fn appendStringComponent(
     allocator: std.mem.Allocator,
     buf: *std.ArrayListUnmanaged(u8),
@@ -980,8 +1187,6 @@ fn appendStringComponent(
     return errors.ParseError.ExtensionNotImplemented;
 }
 
-/// Токенизирует и вычисляет арифметическое выражение, хранящееся внутри
-/// текстовой переменной (оператор присваивания `A#$текст`, вариант 6).
 fn evalStringExpression(
     allocator: std.mem.Allocator,
     content: []const u8,
@@ -994,8 +1199,6 @@ fn evalStringExpression(
     return expr_mod.evaluate(node, st, .{});
 }
 
-/// Записывает вычисленное значение val в цель присваивания: простую
-/// переменную, элемент одномерного или двумерного массива.
 fn storeAssignedValue(
     allocator: std.mem.Allocator,
     st: *InterpreterState,
@@ -1084,7 +1287,6 @@ fn execAssignment(
     const op = toks[idx].kind;
     idx += 1;
 
-    // Вариант 6: A#$текст — вычислить выражение, хранящееся в строке.
     if (op == .hash) {
         if (is_implicit_1d or is_implicit_2d) return errors.ParseError.InvalidStatement;
         if (idx >= toks.len or toks[idx].kind != .dollar) return errors.ParseError.InvalidStatement;
@@ -1099,7 +1301,6 @@ fn execAssignment(
 
     if (op != .equals and op != .colon) return errors.ParseError.InvalidStatement;
 
-    // Вариант 5: A:$?[индекс] — присвоить код символа из строки.
     if (op == .colon and idx < toks.len and toks[idx].kind == .dollar) {
         if (is_implicit_1d or is_implicit_2d) return errors.ParseError.InvalidStatement;
         idx += 1;
@@ -1130,7 +1331,6 @@ fn execAssignment(
         return .next;
     }
 
-    // Варианты 1-4: обычное выражение (= или синоним :).
     const expr_tokens = toks[idx..];
 
     if (is_implicit_1d) {
