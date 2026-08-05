@@ -481,6 +481,13 @@ pub fn execute(
         return execPoli(a, toks[1..], st);
     }
 
+    if (eq(name, "APRO")) {
+        return execApro(a, toks[1..], st);
+    }
+    if (eq(name, "NTGR")) {
+        return execNtgr(a, toks[1..], st);
+    }
+
     if (name.len == 1 and InterpreterState.letterIndex(name[0]) != null) {
         return execAssignment(a, toks, st);
     }
@@ -2920,5 +2927,213 @@ fn execPoli(
     }
 
     st.scalars[y_letter] = @floatCast(result);
+    return .next;
+}
+
+/// Решает СЛАУ n x n методом Гаусса с выбором главного элемента.
+/// m - расширенная матрица n x (n+1) (последний столбец - правая
+/// часть), возвращает вектор решения длины n. Ошибка при вырождении.
+fn solveLinearSystemF64(
+    allocator: std.mem.Allocator,
+    n: usize,
+    m: [][]f64,
+) errors.EllochkaError![]f64 {
+    var row: usize = 0;
+    while (row < n) : (row += 1) {
+        var pivot_row = row;
+        var pivot_val = @abs(m[row][row]);
+        var scan = row + 1;
+        while (scan < n) : (scan += 1) {
+            if (@abs(m[scan][row]) > pivot_val) {
+                pivot_val = @abs(m[scan][row]);
+                pivot_row = scan;
+            }
+        }
+        if (pivot_val < 1e-9) return errors.RuntimeError.MathDomainError;
+        if (pivot_row != row) {
+            const tmp = m[row];
+            m[row] = m[pivot_row];
+            m[pivot_row] = tmp;
+        }
+        var elim = row + 1;
+        while (elim < n) : (elim += 1) {
+            const factor = m[elim][row] / m[row][row];
+            var col = row;
+            while (col < n + 1) : (col += 1) {
+                m[elim][col] -= factor * m[row][col];
+            }
+        }
+    }
+
+    var sol = allocator.alloc(f64, n) catch return errors.RuntimeError.MemoryAllocationFailed;
+    var i: i64 = @as(i64, @intCast(n)) - 1;
+    while (i >= 0) : (i -= 1) {
+        const idx: usize = @intCast(i);
+        var sum = m[idx][n];
+        var j = idx + 1;
+        while (j < n) : (j += 1) {
+            sum -= m[idx][j] * sol[j];
+        }
+        sol[idx] = sum / m[idx][idx];
+        if (i == 0) break;
+    }
+    return sol;
+}
+
+/// APRO X;Y;P;M;K;S - полиномиальная МНК-аппроксимация степени M.
+/// P[1..M+1] по возрастанию степени (как в POLI). K - корреляция
+/// Пирсона (факт/модель), S - RMSE, как в REAK.
+fn execApro(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(6, args);
+    const x_letter = try singleLetterFromTokens(parts[0]);
+    const y_letter = try singleLetterFromTokens(parts[1]);
+    const p_letter = try singleLetterFromTokens(parts[2]);
+
+    var mp = expr_mod.Parser.init(allocator, parts[3]);
+    const mnode = try mp.parseExpr();
+    const mval = try expr_mod.evaluate(mnode, st, .{});
+    const degree: usize = @intFromFloat(mval);
+    const num_coefs = degree + 1;
+
+    const k_letter = try singleLetterFromTokens(parts[4]);
+    const s_letter = try singleLetterFromTokens(parts[5]);
+
+    const xs = st.arrays1d[x_letter];
+    const ys = st.arrays1d[y_letter];
+    if (xs.len == 0 or ys.len == 0) return errors.RuntimeError.ArrayNotSized;
+    if (xs.len != ys.len) return errors.ParseError.InvalidStatement;
+    const m_points = xs.len;
+    if (m_points < num_coefs) return errors.RuntimeError.MathDomainError;
+
+    const ps = st.arrays1d[p_letter];
+    if (ps.len < num_coefs) return errors.RuntimeError.ArrayNotSized;
+
+    // Кэшируем степени X_i от 0 до 2*degree, чтобы не звать pow лишний раз
+    const max_pow = 2 * degree;
+    var powers = allocator.alloc([]f64, m_points) catch return errors.RuntimeError.MemoryAllocationFailed;
+    for (0..m_points) |i| {
+        powers[i] = allocator.alloc(f64, max_pow + 1) catch return errors.RuntimeError.MemoryAllocationFailed;
+        powers[i][0] = 1.0;
+        const xv: f64 = @floatCast(xs[i]);
+        var p: usize = 1;
+        while (p <= max_pow) : (p += 1) {
+            powers[i][p] = powers[i][p - 1] * xv;
+        }
+    }
+
+    var mat = allocator.alloc([]f64, num_coefs) catch return errors.RuntimeError.MemoryAllocationFailed;
+    for (0..num_coefs) |r| {
+        mat[r] = allocator.alloc(f64, num_coefs + 1) catch return errors.RuntimeError.MemoryAllocationFailed;
+        for (0..num_coefs) |c| {
+            var sum_x: f64 = 0.0;
+            for (0..m_points) |i| sum_x += powers[i][r + c];
+            mat[r][c] = sum_x;
+        }
+        var sum_yx: f64 = 0.0;
+        for (0..m_points) |i| sum_yx += @as(f64, @floatCast(ys[i])) * powers[i][r];
+        mat[r][num_coefs] = sum_yx;
+    }
+
+    const sol = try solveLinearSystemF64(allocator, num_coefs, mat);
+    for (0..num_coefs) |j| ps[j] = @floatCast(sol[j]);
+
+    var sum_y: f64 = 0.0;
+    var sum_yhat: f64 = 0.0;
+    var yhat_vals = allocator.alloc(f64, m_points) catch return errors.RuntimeError.MemoryAllocationFailed;
+    for (0..m_points) |i| {
+        var yhat: f64 = 0.0;
+        for (0..num_coefs) |j| yhat += sol[j] * powers[i][j];
+        yhat_vals[i] = yhat;
+        sum_y += @as(f64, @floatCast(ys[i]));
+        sum_yhat += yhat;
+    }
+    const m_f: f64 = @floatFromInt(m_points);
+    const mean_y = sum_y / m_f;
+    const mean_yhat = sum_yhat / m_f;
+
+    var cov: f64 = 0.0;
+    var var_y: f64 = 0.0;
+    var var_yhat: f64 = 0.0;
+    var sse: f64 = 0.0;
+    for (0..m_points) |i| {
+        const dy = @as(f64, @floatCast(ys[i])) - mean_y;
+        const dyh = yhat_vals[i] - mean_yhat;
+        cov += dy * dyh;
+        var_y += dy * dy;
+        var_yhat += dyh * dyh;
+        const resid = @as(f64, @floatCast(ys[i])) - yhat_vals[i];
+        sse += resid * resid;
+    }
+    const denom = @sqrt(var_y * var_yhat);
+    const k_val: f64 = if (denom > 1e-12) cov / denom else 0.0;
+    const s_val: f64 = @sqrt(sse / m_f);
+
+    st.scalars[k_letter] = @floatCast(k_val);
+    st.scalars[s_letter] = @floatCast(s_val);
+
+    return .next;
+}
+
+/// NTGR F;A;B;N;Y - определённый интеграл методом трапеций.
+/// F - текстовая переменная/константа с выражением относительно X.
+fn execNtgr(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(5, args);
+    const content = try resolveStringOperand(parts[0], st);
+
+    var ap = expr_mod.Parser.init(allocator, parts[1]);
+    const anode = try ap.parseExpr();
+    const a_val = try expr_mod.evaluate(anode, st, .{});
+
+    var bp = expr_mod.Parser.init(allocator, parts[2]);
+    const bnode = try bp.parseExpr();
+    const b_val = try expr_mod.evaluate(bnode, st, .{});
+
+    var np = expr_mod.Parser.init(allocator, parts[3]);
+    const nnode = try np.parseExpr();
+    const nval = try expr_mod.evaluate(nnode, st, .{});
+
+    const y_letter = try singleLetterFromTokens(parts[4]);
+
+    if (a_val > b_val) return errors.RuntimeError.MathDomainError;
+    if (a_val == b_val) {
+        st.scalars[y_letter] = 0.0;
+        return .next;
+    }
+
+    const n_int: i64 = @intFromFloat(nval);
+    if (n_int <= 0) return errors.RuntimeError.MathDomainError;
+    const n: usize = @intCast(n_int);
+
+    const x_letter = InterpreterState.letterIndex('X') orelse unreachable;
+    const h: f64 = (@as(f64, @floatCast(b_val)) - @as(f64, @floatCast(a_val))) / @as(f64, @floatFromInt(n));
+    const a64: f64 = @floatCast(a_val);
+    const b64: f64 = @floatCast(b_val);
+
+    st.scalars[x_letter] = @floatCast(a64);
+    const f_a: f64 = @floatCast(try evalStringExpression(allocator, content, st));
+    st.scalars[x_letter] = @floatCast(b64);
+    const f_b: f64 = @floatCast(try evalStringExpression(allocator, content, st));
+
+    var sum: f64 = (f_a + f_b) / 2.0;
+
+    var i: usize = 1;
+    while (i < n) : (i += 1) {
+        const xi = a64 + @as(f64, @floatFromInt(i)) * h;
+        st.scalars[x_letter] = @floatCast(xi);
+        const fi: f64 = @floatCast(try evalStringExpression(allocator, content, st));
+        sum += fi;
+    }
+
+    const result = sum * h;
+    st.scalars[y_letter] = @floatCast(result);
+
     return .next;
 }
