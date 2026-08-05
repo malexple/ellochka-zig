@@ -428,6 +428,12 @@ pub fn execute(
     if (eq(name, "SBMP")) {
         return execSbmp(a, toks[1..], st, io);
     }
+    if (eq(name, "JULD")) {
+        return execJuld(toks[1..], st);
+    }
+    if (eq(name, "DOSC")) {
+        return execDosc(a, toks[1..], st, io);
+    }
 
     if (eq(name, "RADI")) { st.angle_mode = .radians; return .next; }
     if (eq(name, "GRDS")) { st.angle_mode = .degrees; return .next; }
@@ -2475,5 +2481,81 @@ fn execReak(
     st.scalars[r_letter] = @floatCast(r);
     st.scalars[f_letter] = @floatCast(rmse);
 
+    return .next;
+}
+
+/// JULD D;M;Y;J - юлианская дата в обе стороны (алгоритм
+/// Флигеля-Ван Фландерна, 1968). Направление определяется входным
+/// значением J: J≈0 -> вычислить J из D,M,Y; J!=0 -> вычислить D,M,Y
+/// из J. Деления целочисленные с усечением к нулю (@divTrunc),
+/// иначе формула даёт неверный результат для дат до 14-го числа
+/// января/февраля.
+fn execJuld(
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(4, args);
+    const d_letter = try singleLetterFromTokens(parts[0]);
+    const m_letter = try singleLetterFromTokens(parts[1]);
+    const y_letter = try singleLetterFromTokens(parts[2]);
+    const j_letter = try singleLetterFromTokens(parts[3]);
+
+    const j_val = st.scalars[j_letter];
+
+    if (@abs(j_val) < 1e-6) {
+        const d: i32 = @intFromFloat(st.scalars[d_letter]);
+        const m: i32 = @intFromFloat(st.scalars[m_letter]);
+        const y: i32 = @intFromFloat(st.scalars[y_letter]);
+
+        const a = @divTrunc(m - 14, 12);
+        const jdn = d - 32075 +
+            @divTrunc(1461 * (y + 4800 + a), 4) +
+            @divTrunc(367 * (m - 2 - 12 * a), 12) -
+            @divTrunc(3 * @divTrunc(y + 4900 + a, 100), 4);
+
+        st.scalars[j_letter] = @floatFromInt(jdn);
+    } else {
+        const j: i32 = @intFromFloat(j_val);
+
+        const l0 = j + 68569;
+        const n = @divTrunc(4 * l0, 146097);
+        const l1 = l0 - @divTrunc(146097 * n + 3, 4);
+        const y1 = @divTrunc(4000 * (l1 + 1), 1461001);
+        const l2 = l1 - @divTrunc(1461 * y1, 4) + 31;
+        const m1 = @divTrunc(80 * l2, 2447);
+
+        const out_d = l2 - @divTrunc(2447 * m1, 80);
+        const l3 = @divTrunc(m1, 11);
+        const out_m = m1 + 2 - 12 * l3;
+        const out_y = 100 * (n - 49) + y1 + l3;
+
+        st.scalars[d_letter] = @floatFromInt(out_d);
+        st.scalars[m_letter] = @floatFromInt(out_m);
+        st.scalars[y_letter] = @floatFromInt(out_y);
+    }
+
+    return .next;
+}
+
+/// DOSC P - выполнить команду P во внешней оболочке (cmd.exe /C),
+/// синхронно, с наследованием stdin/stdout/stderr от процесса
+/// Эллочки (вывод команды идёт прямо в ту же консоль). Без песочницы
+/// и без кода возврата - строго по исторической спецификации DOSC.
+fn execDosc(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+    io: std.Io,
+) errors.EllochkaError!ExecResult {
+    const cmd_bytes = try resolveStringOperand(args, st);
+    if (cmd_bytes.len == 0) return .next;
+    const cmd_copy = allocator.dupe(u8, cmd_bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
+
+    var child = std.process.Child.init(&[_][]const u8{ "cmd.exe", "/C", cmd_copy }, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+
+    _ = child.spawnAndWait(io) catch return errors.RuntimeError.FileError;
     return .next;
 }
