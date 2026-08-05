@@ -1,0 +1,30 @@
+CLSC
+GRAF
+CSIM 2
+LIST 'MENU (консоль) рисует в окне.'
+LIST 'Up\/Down - выбор, Enter - Ok, Esc - выход.'
+SIZE 3
+DATA 1;3;28
+MENU 3;3;7;10;F
+ESLI F==1;13
+ESLI F==2;17
+ESLI F==3;21
+GOTO 24
+CSIM 12
+KRUG 320;240;100;1
+LIST 'выбран: круг (окно)'
+GOTO 24
+CSIM 10
+RAMA 150;150;450;350
+LIST 'выбран: рамка (окно)'
+GOTO 24
+CSIM 14
+LINE 50;400;600;400
+LIST 'выбран: линия (окно)'
+LIST 'Нажмите клавишу'
+WAIT
+TEXT
+EXIT
+!Пункт 1: круг
+!Пункт 2: рамка
+!Пункт 3: линия

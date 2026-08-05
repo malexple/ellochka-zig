@@ -4,6 +4,7 @@ const state_mod = @import("state.zig");
 const program_mod = @import("program.zig");
 const statement_mod = @import("statement.zig");
 const errors = @import("errors.zig");
+const graphics = @import("graphics.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -87,6 +88,9 @@ pub fn main() !void {
         }
 
         if (st.should_exit) break;
+
+        graphics.pumpMessages();
+        if (graphics.shouldForceExit()) break;
     }
 
     try stdout.flush();

@@ -219,6 +219,8 @@ fn peekKeyCode() ?f32 {
     }
 }
 
+extern "kernel32" fn Sleep(dwMilliseconds: u32) callconv(.winapi) void;
+
 fn blockingReadKeyCode() f32 {
     if (builtin.os.tag != .windows) return 0.0;
     const handle = GetStdHandle(STD_INPUT_HANDLE);
@@ -230,13 +232,20 @@ fn blockingReadKeyCode() f32 {
 
     var records: [1]INPUT_RECORD = undefined;
     while (true) {
-        var read_count: u32 = 0;
-        if (ReadConsoleInputA(handle, &records, 1, &read_count) == 0) return 0.0;
-        const rec = records[0];
-        if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
-            const ascii = rec.Event.KeyEvent.uChar.AsciiChar;
-            return if (ascii != 0) @floatFromInt(ascii) else 256.0;
+        var peek_count: u32 = 0;
+        if (PeekConsoleInputA(handle, &records, 1, &peek_count) != 0 and peek_count > 0) {
+            var read_count: u32 = 0;
+            _ = ReadConsoleInputA(handle, &records, 1, &read_count);
+            const rec = records[0];
+            if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
+                const ascii = rec.Event.KeyEvent.uChar.AsciiChar;
+                return if (ascii != 0) @floatFromInt(ascii) else 256.0;
+            }
+            continue;
         }
+        graphics.pumpMessages();
+        if (graphics.shouldForceExit()) return 27.0;
+        Sleep(10);
     }
 }
 
@@ -253,12 +262,19 @@ fn readMenuKey() MenuKey {
 
     var records: [1]INPUT_RECORD = undefined;
     while (true) {
-        var read_count: u32 = 0;
-        if (ReadConsoleInputA(handle, &records, 1, &read_count) == 0) return .{ .vk = 0, .ascii = 0 };
-        const rec = records[0];
-        if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
-            return .{ .vk = rec.Event.KeyEvent.wVirtualKeyCode, .ascii = rec.Event.KeyEvent.uChar.AsciiChar };
+        var peek_count: u32 = 0;
+        if (PeekConsoleInputA(handle, &records, 1, &peek_count) != 0 and peek_count > 0) {
+            var read_count: u32 = 0;
+            _ = ReadConsoleInputA(handle, &records, 1, &read_count);
+            const rec = records[0];
+            if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
+                return .{ .vk = rec.Event.KeyEvent.wVirtualKeyCode, .ascii = rec.Event.KeyEvent.uChar.AsciiChar };
+            }
+            continue;
         }
+        graphics.pumpMessages();
+        if (graphics.shouldForceExit()) return .{ .vk = 0, .ascii = 27 };
+        Sleep(10);
     }
 }
 
