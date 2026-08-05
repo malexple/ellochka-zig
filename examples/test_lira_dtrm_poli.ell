@@ -1,0 +1,45 @@
+CLSC
+LIST 'Тест LIRA / DTRM / POLI'
+
+! --- LIRA: x+y=3, x-y=1 -> x=2, y=1 ---
+SIZE [2]=X
+SIZE [2,3]=A
+A[1,1]=1
+A[1,2]=1
+A[1,3]=3
+A[2,1]=1
+A[2,2]=-1
+A[2,3]=1
+LIRA X;A
+LIST 'LIRA: x='; X[1]; ' y='; X[2]; ' (ждём x=2 y=1)'
+
+! --- DTRM: матрица с нулём в углу, det=-2 ---
+SIZE [3,3]=M
+M[1,1]=0
+M[1,2]=1
+M[1,3]=2
+M[2,1]=1
+M[2,2]=0
+M[2,3]=3
+M[3,1]=4
+M[3,2]=-3
+M[3,3]=8
+DTRM M;3;D
+LIST 'DTRM: D='; D; ' (ждём -2)'
+
+! --- POLI: y=2+3x+x^2, degree=2, X=5 -> y=42 ---
+SIZE [3]=P
+P[1]=2
+P[2]=3
+P[3]=1
+POLI 5;P;2;Y
+LIST 'POLI: Y='; Y; ' (ждём 42)'
+
+! --- POLI: константа (degree=0), P=[7], X=100 -> y=7 ---
+SIZE [1]=Q
+Q[1]=7
+POLI 100;Q;0;Z
+LIST 'POLI degree0: Z='; Z; ' (ждём 7)'
+
+LIST 'Готово'
+EXIT

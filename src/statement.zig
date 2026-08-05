@@ -471,6 +471,15 @@ pub fn execute(
     if (eq(name, "READ")) {
         return execRead(a, toks[1..], st, io);
     }
+    if (eq(name, "LIRA")) {
+        return execLira(a, toks[1..], st);
+    }
+    if (eq(name, "DTRM")) {
+        return execDtrm(a, toks[1..], st);
+    }
+    if (eq(name, "POLI")) {
+        return execPoli(a, toks[1..], st);
+    }
 
     if (name.len == 1 and InterpreterState.letterIndex(name[0]) != null) {
         return execAssignment(a, toks, st);
@@ -2727,5 +2736,189 @@ fn execRead(
         i += 1;
     }
 
+    return .next;
+}
+
+/// LIRA X;A - решение СЛАУ методом Гаусса с pivoting.
+/// A - расширенная матрица N x (N+1) (коэффициенты + правая часть в
+/// последнем столбце), X - 1D-массив длины N, куда пишется решение.
+fn execLira(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(2, args);
+    const x_letter = try singleLetterFromTokens(parts[0]);
+    const a_letter = try singleLetterFromTokens(parts[1]);
+
+    const xs = st.arrays1d[x_letter];
+    const n = xs.len;
+    if (n == 0) return errors.RuntimeError.ArrayNotSized;
+
+    const mat2d = st.arrays2d[a_letter];
+    if (mat2d.rows != n or mat2d.cols != n + 1) return errors.ParseError.InvalidStatement;
+
+    var m = allocator.alloc([]f64, n) catch return errors.RuntimeError.MemoryAllocationFailed;
+    for (0..n) |r| {
+        m[r] = allocator.alloc(f64, n + 1) catch return errors.RuntimeError.MemoryAllocationFailed;
+        for (0..n + 1) |c| {
+            m[r][c] = mat2d.data[mat2d.indexOf(r, c)];
+        }
+    }
+
+    var row: usize = 0;
+    while (row < n) : (row += 1) {
+        var pivot_row = row;
+        var pivot_val = @abs(m[row][row]);
+        var scan = row + 1;
+        while (scan < n) : (scan += 1) {
+            if (@abs(m[scan][row]) > pivot_val) {
+                pivot_val = @abs(m[scan][row]);
+                pivot_row = scan;
+            }
+        }
+        if (pivot_val < 1e-9) return errors.RuntimeError.MathDomainError;
+        if (pivot_row != row) {
+            const tmp = m[row];
+            m[row] = m[pivot_row];
+            m[pivot_row] = tmp;
+        }
+        var elim = row + 1;
+        while (elim < n) : (elim += 1) {
+            const factor = m[elim][row] / m[row][row];
+            var col = row;
+            while (col < n + 1) : (col += 1) {
+                m[elim][col] -= factor * m[row][col];
+            }
+        }
+    }
+
+    var sol = allocator.alloc(f64, n) catch return errors.RuntimeError.MemoryAllocationFailed;
+    var i: i64 = @as(i64, @intCast(n)) - 1;
+    while (i >= 0) : (i -= 1) {
+        const idx: usize = @intCast(i);
+        var sum = m[idx][n];
+        var j = idx + 1;
+        while (j < n) : (j += 1) {
+            sum -= m[idx][j] * sol[j];
+        }
+        sol[idx] = sum / m[idx][idx];
+        if (i == 0) break;
+    }
+
+    for (0..n) |k| {
+        xs[k] = @floatCast(sol[k]);
+    }
+
+    return .next;
+}
+
+/// DTRM M;N;D - определитель N x N подматрицы M методом Гаусса.
+/// Вырождение -> D=0 (валидный результат, не ошибка), знак определителя
+/// учитывает перестановки строк при pivoting.
+fn execDtrm(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(3, args);
+    const m_letter = try singleLetterFromTokens(parts[0]);
+
+    var np = expr_mod.Parser.init(allocator, parts[1]);
+    const nnode = try np.parseExpr();
+    const nval = try expr_mod.evaluate(nnode, st, .{});
+    const n: usize = @intFromFloat(nval);
+    if (n == 0) return errors.ParseError.InvalidStatement;
+
+    const d_letter = try singleLetterFromTokens(parts[2]);
+
+    const mat2d = st.arrays2d[m_letter];
+    if (mat2d.rows < n or mat2d.cols < n) return errors.RuntimeError.ArrayNotSized;
+
+    var m = allocator.alloc([]f64, n) catch return errors.RuntimeError.MemoryAllocationFailed;
+    for (0..n) |r| {
+        m[r] = allocator.alloc(f64, n) catch return errors.RuntimeError.MemoryAllocationFailed;
+        for (0..n) |c| {
+            m[r][c] = mat2d.data[mat2d.indexOf(r, c)];
+        }
+    }
+
+    var sign: f64 = 1.0;
+    var det: f64 = 1.0;
+    var singular = false;
+
+    var row: usize = 0;
+    while (row < n) : (row += 1) {
+        var pivot_row = row;
+        var pivot_val = @abs(m[row][row]);
+        var scan = row + 1;
+        while (scan < n) : (scan += 1) {
+            if (@abs(m[scan][row]) > pivot_val) {
+                pivot_val = @abs(m[scan][row]);
+                pivot_row = scan;
+            }
+        }
+        if (pivot_val < 1e-9) {
+            singular = true;
+            break;
+        }
+        if (pivot_row != row) {
+            const tmp = m[row];
+            m[row] = m[pivot_row];
+            m[pivot_row] = tmp;
+            sign = -sign;
+        }
+        det *= m[row][row];
+        var elim = row + 1;
+        while (elim < n) : (elim += 1) {
+            const factor = m[elim][row] / m[row][row];
+            var col = row;
+            while (col < n) : (col += 1) {
+                m[elim][col] -= factor * m[row][col];
+            }
+        }
+    }
+
+    const result: f64 = if (singular) 0.0 else det * sign;
+    st.scalars[d_letter] = @floatCast(result);
+
+    return .next;
+}
+
+/// POLI X;P;M;Y - значение полинома степени M в точке X по схеме
+/// Горнера. P[1..M+1] по возрастанию степени (P[1] - свободный член).
+fn execPoli(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(4, args);
+
+    var xp = expr_mod.Parser.init(allocator, parts[0]);
+    const xnode = try xp.parseExpr();
+    const x_val_f32 = try expr_mod.evaluate(xnode, st, .{});
+    const x_val: f64 = @floatCast(x_val_f32);
+
+    const p_letter = try singleLetterFromTokens(parts[1]);
+
+    var mp = expr_mod.Parser.init(allocator, parts[2]);
+    const mnode = try mp.parseExpr();
+    const mval = try expr_mod.evaluate(mnode, st, .{});
+    const degree: usize = @intFromFloat(mval);
+
+    const y_letter = try singleLetterFromTokens(parts[3]);
+
+    const coeffs = st.arrays1d[p_letter];
+    if (coeffs.len < degree + 1) return errors.RuntimeError.ArrayNotSized;
+
+    var result: f64 = @floatCast(coeffs[degree]);
+    var i: i64 = @as(i64, @intCast(degree)) - 1;
+    while (i >= 0) : (i -= 1) {
+        const idx: usize = @intCast(i);
+        result = result * x_val + @as(f64, @floatCast(coeffs[idx]));
+        if (i == 0) break;
+    }
+
+    st.scalars[y_letter] = @floatCast(result);
     return .next;
 }
