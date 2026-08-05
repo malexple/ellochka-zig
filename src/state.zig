@@ -44,6 +44,28 @@ pub const DynamicString = struct {
     }
 };
 
+/// Стандартная 16-цветная палитра VGA/EGA в формате Win32 COLORREF
+/// (0x00BBGGRR). Используется как значение по умолчанию и для сброса
+/// оператором CVET без аргументов.
+pub const DEFAULT_PALETTE = [16]u32{
+    0x00000000, // 0: чёрный
+    0x00800000, // 1: синий
+    0x00008000, // 2: зелёный
+    0x00808000, // 3: голубой
+    0x00000080, // 4: красный
+    0x00800080, // 5: фиолетовый
+    0x00008080, // 6: коричневый
+    0x00C0C0C0, // 7: светло-серый
+    0x00808080, // 8: тёмно-серый
+    0x00FF0000, // 9: ярко-синий
+    0x0000FF00, // 10: ярко-зелёный
+    0x00FFFF00, // 11: ярко-голубой
+    0x000000FF, // 12: ярко-красный
+    0x00FF00FF, // 13: ярко-фиолетовый
+    0x0000FFFF, // 14: жёлтый
+    0x00FFFFFF, // 15: белый
+};
+
 pub const InterpreterState = struct {
     allocator: std.mem.Allocator,
 
@@ -65,10 +87,16 @@ pub const InterpreterState = struct {
     program_counter: usize = 1,
     should_exit: bool = false,
 
-    /// Индекс последнего выбранного элемента MENU (1-based), запоминается
-    /// между вызовами MENU в рамках всей программы (см. спецификацию: "номер
-    /// выбранного элемента запоминается и предлагается в следующих вызовах").
     last_menu_selection: usize = 1,
+
+    /// Палитра для графического режима (0x00BBGGRR), правится через CVET.
+    palette: [16]u32 = DEFAULT_PALETTE,
+    /// Текущий цвет (0-15), общий для текста (CSIM) и графики.
+    current_color_index: u8 = 15,
+    /// Текущая точка для MOVE (в логических координатах Эллочки, до
+    /// применения инверсии оси Y).
+    graphics_cursor_x: f32 = 0.0,
+    graphics_cursor_y: f32 = 0.0,
 
     pub fn init(allocator: std.mem.Allocator) InterpreterState {
         return .{ .allocator = allocator };

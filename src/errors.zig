@@ -27,6 +27,7 @@ MemoryAllocationFailed,
 StringTooLong,
 InvalidExpressionInString,
 FileError,
+GraphicsModeNotInitialized,
 };
 
 pub const EllochkaError = ParseError || RuntimeError;

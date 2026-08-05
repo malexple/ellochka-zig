@@ -1,0 +1,54 @@
+! Тест графики: GRAF/CVET/PIXL/RDOT/LINE/RAMA
+CLSC
+LIST 'Открываем графическое окно...'
+GRAF
+
+! PIXL + RDOT
+CSIM 12
+PIXL 100;100
+RDOT 100;100;C
+LIST 'RDOT после PIXL цветом 12: '; C
+
+! LINE
+CSIM 10
+LINE 50;50;250;50
+
+! RAMA
+CSIM 9
+RAMA 300;30;450;130
+
+! KRUG (круг: радиус 40, аспект 1)
+CSIM 14
+KRUG 550;100;40;1
+
+! MOVE от текущей точки
+CSIM 11
+PIXL 50;250
+MOVE 150;0
+MOVE 0;80
+MOVE -150;0
+
+! RAMA + PAIN (заливка внутри рамки)
+CSIM 13
+RAMA 300;200;450;320
+CSIM 3
+PAIN 375;260;13
+
+! CVET: перекраска индекса 1
+CVET 1;0;0;63
+CSIM 1
+PIXL 20;20
+RDOT 20;20;C
+LIST 'RDOT после CVET (ожидаем 1): '; C
+
+! SBMP: сохраняем экран
+SBMP 'test_graf_out'
+LENF 'test_graf_out.bmp';L
+LIST 'Размер BMP: '; L; ' байт'
+
+LIST 'Посмотрите на окно, нажмите клавишу'
+WAIT
+
+TEXT
+LIST 'Окно скрыто (TEXT). Готово.'
+EXIT

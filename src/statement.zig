@@ -6,6 +6,7 @@ const expr_mod = @import("expr.zig");
 const state_mod = @import("state.zig");
 const program_mod = @import("program.zig");
 const errors = @import("errors.zig");
+const graphics = @import("graphics.zig");
 
 const InterpreterState = state_mod.InterpreterState;
 const Program = program_mod.Program;
@@ -239,8 +240,6 @@ fn blockingReadKeyCode() f32 {
     }
 }
 
-/// Низкоуровневое чтение клавиши для MENU: возвращает и виртуальный
-/// код клавиши (для стрелок/PgUp/PgDn), и ASCII-код (для Enter/Esc).
 const MenuKey = struct { vk: u16, ascii: u8 };
 
 fn readMenuKey() MenuKey {
@@ -263,9 +262,6 @@ fn readMenuKey() MenuKey {
     }
 }
 
-/// Сбрасывает все накопившиеся в очереди события клавиатуры консоли
-/// (например, "фантомное" нажатие Enter, которым была запущена сама
-/// программа). Вызывается один раз перед началом интерактивного цикла MENU.
 fn drainPendingInput() void {
     if (builtin.os.tag != .windows) return;
     const handle = GetStdHandle(STD_INPUT_HANDLE);
@@ -379,6 +375,40 @@ pub fn execute(
     if (eq(name, "GETF")) {
         return execPutfGetf(a, toks[1..], st, io, false);
     }
+    if (eq(name, "GRAF")) {
+        return execGraf(st);
+    }
+    if (eq(name, "TEXT")) {
+        graphics.hideWindow();
+        return .next;
+    }
+    if (eq(name, "PIXL")) {
+        return execPixl(a, toks[1..], st);
+    }
+    if (eq(name, "RDOT")) {
+        return execRdot(a, toks[1..], st);
+    }
+    if (eq(name, "CVET")) {
+        return execCvet(a, toks[1..], st);
+    }
+    if (eq(name, "LINE")) {
+        return execLineOp(a, toks[1..], st);
+    }
+    if (eq(name, "RAMA")) {
+        return execRama(a, toks[1..], st);
+    }
+    if (eq(name, "MOVE")) {
+        return execMove(a, toks[1..], st);
+    }
+    if (eq(name, "KRUG")) {
+        return execKrug(a, toks[1..], st);
+    }
+    if (eq(name, "PAIN")) {
+        return execPain(a, toks[1..], st);
+    }
+    if (eq(name, "SBMP")) {
+        return execSbmp(a, toks[1..], st, io);
+    }
 
     if (eq(name, "RADI")) { st.angle_mode = .radians; return .next; }
     if (eq(name, "GRDS")) { st.angle_mode = .degrees; return .next; }
@@ -401,9 +431,6 @@ pub fn execute(
 
     if (eq(name, "CLSC")) {
         stdout.print("\x1B[2J\x1B[H", .{}) catch {};
-        return .next;
-    }
-    if (eq(name, "TEXT") or eq(name, "GRAF")) {
         return .next;
     }
     if (eq(name, "CFON") or eq(name, "CSIM") or eq(name, "STRO") or eq(name, "STLB")) {
@@ -479,10 +506,6 @@ fn execWait(
     return .next;
 }
 
-/// MENU N;L;S;C;F — многостраничное текстовое меню. N - число элементов
-/// (из строкового массива), L - элементов на странице, S/C - строка/столбец
-/// левого верхнего угла, F - переменная с результатом (номер выбранного
-/// элемента, 0 при Esc, <0 при ошибке параметров). Стрелки/PgUp/PgDn/Enter/Esc.
 fn execMenu(
     allocator: std.mem.Allocator,
     args: []lexer.Token,
@@ -1038,6 +1061,7 @@ fn execAnsiControl(
     const n: u32 = @intFromFloat(val);
 
     if (eq(name, "CSIM")) {
+        st.current_color_index = @intCast(@min(n, 15));
         const code: u32 = if (n < 8) 30 + n else 90 + (n - 8);
         stdout.print("\x1B[{d}m", .{code}) catch {};
     } else if (eq(name, "CFON")) {
@@ -1977,4 +2001,257 @@ fn execPutfGetf(
     }
 
     return errors.ParseError.ExtensionNotImplemented;
+}
+
+// ============================================================================
+// Группа 4: графика (GRAF/TEXT реальные, PIXL, RDOT, CVET, LINE, RAMA, MOVE,
+// KRUG, PAIN, SBMP) — через Win32 GDI, см. src/graphics.zig
+// ============================================================================
+
+/// Преобразует логическую координату Y (Эллочка, ось может быть вверх/вниз)
+/// в экранный ряд пикселя 0..479 (0 - верх окна).
+fn flipY(st: *InterpreterState, y: f32) i32 {
+    const yi: i32 = @intFromFloat(y);
+    return if (st.ordinate_direction == .up) (graphics.HEIGHT - 1 - yi) else yi;
+}
+
+fn currentColorRef(st: *InterpreterState) u32 {
+    return st.palette[st.current_color_index];
+}
+
+fn colorRefForIndex(st: *InterpreterState, idx_f: f32) u32 {
+    var idx: i32 = @intFromFloat(idx_f);
+    if (idx < 0) idx = 0;
+    if (idx > 15) idx = 15;
+    return st.palette[@intCast(idx)];
+}
+
+fn execGraf(st: *InterpreterState) errors.EllochkaError!ExecResult {
+    if (!graphics.initGraphics()) return errors.RuntimeError.FileError;
+    _ = st;
+    return .next;
+}
+
+fn requireGraphics() errors.EllochkaError!void {
+    if (!graphics.isInitialized()) return errors.RuntimeError.GraphicsModeNotInitialized;
+}
+
+fn execPixl(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    try requireGraphics();
+    const parts = try splitBySemicolon(2, args);
+    var xp = expr_mod.Parser.init(allocator, parts[0]);
+    const xnode = try xp.parseExpr();
+    const xval = try expr_mod.evaluate(xnode, st, .{});
+    var yp = expr_mod.Parser.init(allocator, parts[1]);
+    const ynode = try yp.parseExpr();
+    const yval = try expr_mod.evaluate(ynode, st, .{});
+
+    const px: i32 = @intFromFloat(xval);
+    const py = flipY(st, yval);
+    graphics.setPixel(px, py, currentColorRef(st));
+    st.graphics_cursor_x = xval;
+    st.graphics_cursor_y = yval;
+    return .next;
+}
+
+fn execRdot(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    try requireGraphics();
+    const parts = try splitBySemicolon(3, args);
+    var xp = expr_mod.Parser.init(allocator, parts[0]);
+    const xnode = try xp.parseExpr();
+    const xval = try expr_mod.evaluate(xnode, st, .{});
+    var yp = expr_mod.Parser.init(allocator, parts[1]);
+    const ynode = try yp.parseExpr();
+    const yval = try expr_mod.evaluate(ynode, st, .{});
+    const c_letter = try singleLetterFromTokens(parts[2]);
+
+    const px: i32 = @intFromFloat(xval);
+    const py = flipY(st, yval);
+    const raw = graphics.getPixel(px, py);
+
+    var found: f32 = 0.0;
+    for (st.palette, 0..) |entry, i| {
+        if (entry == raw) {
+            found = @floatFromInt(i);
+            break;
+        }
+    }
+    st.scalars[c_letter] = found;
+    return .next;
+}
+
+fn execCvet(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    if (args.len == 0) {
+        st.palette = state_mod.DEFAULT_PALETTE;
+        return .next;
+    }
+    const parts = try splitBySemicolon(4, args);
+    var cp = expr_mod.Parser.init(allocator, parts[0]);
+    const cnode = try cp.parseExpr();
+    const cval = try expr_mod.evaluate(cnode, st, .{});
+    var rp = expr_mod.Parser.init(allocator, parts[1]);
+    const rnode = try rp.parseExpr();
+    const rval = try expr_mod.evaluate(rnode, st, .{});
+    var gp = expr_mod.Parser.init(allocator, parts[2]);
+    const gnode = try gp.parseExpr();
+    const gval = try expr_mod.evaluate(gnode, st, .{});
+    var bp = expr_mod.Parser.init(allocator, parts[3]);
+    const bnode = try bp.parseExpr();
+    const bval = try expr_mod.evaluate(bnode, st, .{});
+
+    var idx: i32 = @intFromFloat(cval);
+    if (idx < 0) idx = 0;
+    if (idx > 15) idx = 15;
+    const r: u32 = @intFromFloat(std.math.clamp(rval, 0.0, 63.0));
+    const g: u32 = @intFromFloat(std.math.clamp(gval, 0.0, 63.0));
+    const b: u32 = @intFromFloat(std.math.clamp(bval, 0.0, 63.0));
+    const r255 = (r * 255) / 63;
+    const g255 = (g * 255) / 63;
+    const b255 = (b * 255) / 63;
+    st.palette[@intCast(idx)] = (b255 << 16) | (g255 << 8) | r255;
+    return .next;
+}
+
+fn execLineOp(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    try requireGraphics();
+    const parts = try splitBySemicolon(4, args);
+    var xp1 = expr_mod.Parser.init(allocator, parts[0]);
+    const x1v = try expr_mod.evaluate(try xp1.parseExpr(), st, .{});
+    var yp1 = expr_mod.Parser.init(allocator, parts[1]);
+    const y1v = try expr_mod.evaluate(try yp1.parseExpr(), st, .{});
+    var xp2 = expr_mod.Parser.init(allocator, parts[2]);
+    const x2v = try expr_mod.evaluate(try xp2.parseExpr(), st, .{});
+    var yp2 = expr_mod.Parser.init(allocator, parts[3]);
+    const y2v = try expr_mod.evaluate(try yp2.parseExpr(), st, .{});
+
+    graphics.drawLine(@intFromFloat(x1v), flipY(st, y1v), @intFromFloat(x2v), flipY(st, y2v), currentColorRef(st));
+    st.graphics_cursor_x = x2v;
+    st.graphics_cursor_y = y2v;
+    return .next;
+}
+
+fn execRama(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    try requireGraphics();
+    const parts = try splitBySemicolon(4, args);
+    var xp1 = expr_mod.Parser.init(allocator, parts[0]);
+    const x1v = try expr_mod.evaluate(try xp1.parseExpr(), st, .{});
+    var yp1 = expr_mod.Parser.init(allocator, parts[1]);
+    const y1v = try expr_mod.evaluate(try yp1.parseExpr(), st, .{});
+    var xp2 = expr_mod.Parser.init(allocator, parts[2]);
+    const x2v = try expr_mod.evaluate(try xp2.parseExpr(), st, .{});
+    var yp2 = expr_mod.Parser.init(allocator, parts[3]);
+    const y2v = try expr_mod.evaluate(try yp2.parseExpr(), st, .{});
+
+    graphics.drawRect(@intFromFloat(x1v), flipY(st, y1v), @intFromFloat(x2v), flipY(st, y2v), currentColorRef(st));
+    return .next;
+}
+
+fn execMove(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    try requireGraphics();
+    const parts = try splitBySemicolon(2, args);
+    var xp = expr_mod.Parser.init(allocator, parts[0]);
+    const dx = try expr_mod.evaluate(try xp.parseExpr(), st, .{});
+    var yp = expr_mod.Parser.init(allocator, parts[1]);
+    const dy = try expr_mod.evaluate(try yp.parseExpr(), st, .{});
+
+    const old_x = st.graphics_cursor_x;
+    const old_y = st.graphics_cursor_y;
+    const new_x = old_x + dx;
+    const new_y = old_y + dy;
+
+    graphics.drawLine(
+        @intFromFloat(old_x),
+        flipY(st, old_y),
+        @intFromFloat(new_x),
+        flipY(st, new_y),
+        currentColorRef(st),
+    );
+    st.graphics_cursor_x = new_x;
+    st.graphics_cursor_y = new_y;
+    return .next;
+}
+
+fn execKrug(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    try requireGraphics();
+    const parts = try splitBySemicolon(4, args);
+    var xp = expr_mod.Parser.init(allocator, parts[0]);
+    const xv = try expr_mod.evaluate(try xp.parseExpr(), st, .{});
+    var yp = expr_mod.Parser.init(allocator, parts[1]);
+    const yv = try expr_mod.evaluate(try yp.parseExpr(), st, .{});
+    var rp = expr_mod.Parser.init(allocator, parts[2]);
+    const rv = try expr_mod.evaluate(try rp.parseExpr(), st, .{});
+    var ap = expr_mod.Parser.init(allocator, parts[3]);
+    const av = try expr_mod.evaluate(try ap.parseExpr(), st, .{});
+
+    const cx: i32 = @intFromFloat(xv);
+    const cy = flipY(st, yv);
+    const rx: i32 = @intFromFloat(rv);
+    const ry: i32 = @intFromFloat(rv * av);
+    graphics.drawEllipse(cx, cy, rx, ry, currentColorRef(st));
+    return .next;
+}
+
+fn execPain(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    try requireGraphics();
+    const parts = try splitBySemicolon(3, args);
+    var xp = expr_mod.Parser.init(allocator, parts[0]);
+    const xv = try expr_mod.evaluate(try xp.parseExpr(), st, .{});
+    var yp = expr_mod.Parser.init(allocator, parts[1]);
+    const yv = try expr_mod.evaluate(try yp.parseExpr(), st, .{});
+    var gp = expr_mod.Parser.init(allocator, parts[2]);
+    const gv = try expr_mod.evaluate(try gp.parseExpr(), st, .{});
+
+    const px: i32 = @intFromFloat(xv);
+    const py = flipY(st, yv);
+    graphics.floodFill(px, py, currentColorRef(st), colorRefForIndex(st, gv));
+    return .next;
+}
+
+fn execSbmp(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+    io: std.Io,
+) errors.EllochkaError!ExecResult {
+    try requireGraphics();
+    const raw_path = try resolveStringOperand(args, st);
+    var path_buf = std.ArrayListUnmanaged(u8){};
+    path_buf.appendSlice(allocator, raw_path) catch return errors.RuntimeError.MemoryAllocationFailed;
+    if (!std.ascii.endsWithIgnoreCase(path_buf.items, ".bmp")) {
+        path_buf.appendSlice(allocator, ".bmp") catch return errors.RuntimeError.MemoryAllocationFailed;
+    }
+    graphics.saveBmp(io, path_buf.items) catch return errors.RuntimeError.FileError;
+    return .next;
 }
