@@ -1,3 +1,5 @@
+//! Ellochka-Zig — интерпретатор языка Ellochka (автор Э.Г. Гаузер, 1999).
+//! Оригинальное описание языка: https://erichware.com/inform/ellochka.htm
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
