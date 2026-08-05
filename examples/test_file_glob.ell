@@ -1,0 +1,15 @@
+! Проверка FILE с правильным путём
+CLSC
+SIZE 20
+K=1
+$K='examples/*.ell'
+FILE $K;N
+LIST 'Найдено .ell файлов: '; N
+
+I=1
+@loop
+LIST I; ': '; $I
+INCR I
+ESLI I <= N; @loop
+
+EXIT

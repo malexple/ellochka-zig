@@ -1,0 +1,74 @@
+! Тест LENF/UDAL/PATH/FILE/FREE/SORT/TYPE/PUTF/GETF
+CLSC
+CSIM 2
+LIST 'ТЕСТ ФАЙЛОВЫХ ОПЕРАТОРОВ'
+CSIM 7
+LIST ''
+
+SIZE 10
+I=1
+$I='test_ell.tmp'
+
+UDAL $I
+LENF $I;L
+LIST 'LENF (нет файла): '; L
+
+TYPE $I;'Hello file'
+TYPE $I;'Line 2'
+LENF $I;L
+LIST 'LENF (после TYPE): '; L
+
+! PATH
+J=2
+$J='.'
+PATH $J
+LIST 'PATH(.) = '; $J
+
+! FILE
+K=3
+$K='*.ell'
+FILE $K;N
+LIST 'FILE найдено: '; N
+
+! SORT
+SIZE [5]=A
+A[1]=5
+A[2]=1
+A[3]=9
+A[4]=3
+A[5]=7
+SORT A;5;-1
+LIST 'SORT A по убыв.: '; A[1];' ';A[2];' ';A[3];' ';A[4];' ';A[5]
+
+! PUTF/GETF 1M (числа)
+SIZE [3]=X
+X[1]=1.5
+X[2]=2.5
+X[3]=3.5
+M=4
+$M='bin_ell.tmp'
+UDAL $M
+PUTF $M;1X;4;0;4
+SIZE [3]=Y
+GETF $M;1Y;4;0;4
+LIST 'GETF Y: '; Y[1];' ';Y[2];' ';Y[3]
+
+! PUTF/GETF текстовый буфер
+P=5
+$P='Privet'
+Q=6
+$Q=$M
+PUTF $Q;$P;6;0
+R=7
+GETF $Q;$R;6;0
+LIST 'GETF текст: '; $R
+
+! FREE
+FREE 0;L
+LIST 'Свободно байт: '; L
+
+UDAL $I
+UDAL $M
+
+CSIM 7
+EXIT

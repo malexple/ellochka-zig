@@ -26,6 +26,7 @@ StackOverflow,
 MemoryAllocationFailed,
 StringTooLong,
 InvalidExpressionInString,
+FileError,
 };
 
 pub const EllochkaError = ParseError || RuntimeError;

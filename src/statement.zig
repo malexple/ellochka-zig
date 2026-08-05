@@ -27,8 +27,6 @@ fn tokenizeLine(allocator: std.mem.Allocator, line: []const u8) ![]lexer.Token {
     return toks.toOwnedSlice(allocator);
 }
 
-/// Если токен обозначает цифру 0-9 или букву A-Z (регистронезависимо),
-/// возвращает этот символ. Используется для разбора `$0`..`$9` и `$A`..`$Z`.
 fn dollarTargetChar(tok: lexer.Token) ?u8 {
     if (tok.kind == .number and tok.text.len == 1 and tok.text[0] >= '0' and tok.text[0] <= '9') {
         return tok.text[0];
@@ -40,9 +38,6 @@ fn dollarTargetChar(tok: lexer.Token) ?u8 {
     return null;
 }
 
-/// Резолвит "строковый операнд": либо строковую константу (1 токен),
-/// либо $-переменную (2 токена: dollar + цифра/буква). Используется в
-/// ESLI (сравнение строк), DLIN, FIND, %MID.
 fn resolveStringOperand(tokens: []lexer.Token, st: *InterpreterState) errors.EllochkaError![]const u8 {
     if (tokens.len == 1 and tokens[0].kind == .string_literal) return tokens[0].text;
     if (tokens.len == 2 and tokens[0].kind == .dollar) {
@@ -52,7 +47,6 @@ fn resolveStringOperand(tokens: []lexer.Token, st: *InterpreterState) errors.Ell
     return errors.ParseError.InvalidStatement;
 }
 
-/// Форматирует f32 в строку без лишних хвостовых нулей: 5.0 -> "5", 5.5 -> "5.5".
 fn formatScalar(buf: []u8, val: f32) []const u8 {
     if (val == @trunc(val) and @abs(val) < 1.0e15) {
         const i: i64 = @intFromFloat(val);
@@ -60,8 +54,6 @@ fn formatScalar(buf: []u8, val: f32) []const u8 {
     }
     return std.fmt.bufPrint(buf, "{d}", .{val}) catch "";
 }
-
-// --- Win32: время, консольная клавиатура ------------------------------------
 
 const SYSTEMTIME = extern struct {
     wYear: u16,
@@ -106,7 +98,6 @@ extern "kernel32" fn SetConsoleMode(hConsoleHandle: ?*anyopaque, dwMode: u32) ca
 extern "kernel32" fn PeekConsoleInputA(hConsoleInput: ?*anyopaque, lpBuffer: [*]INPUT_RECORD, nLength: u32, lpNumberOfEventsRead: *u32) callconv(.winapi) i32;
 extern "kernel32" fn ReadConsoleInputA(hConsoleInput: ?*anyopaque, lpBuffer: [*]INPUT_RECORD, nLength: u32, lpNumberOfEventsRead: *u32) callconv(.winapi) i32;
 
-/// Дописывает в буфер текущую локальную дату в формате dd/mm/yyyy.
 fn appendDateString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8)) errors.EllochkaError!void {
     var day: u16 = 1;
     var month: u16 = 1;
@@ -132,7 +123,6 @@ fn appendDateString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u
     buf.appendSlice(allocator, s) catch return errors.RuntimeError.MemoryAllocationFailed;
 }
 
-/// Дописывает в буфер текущее локальное время в формате hh:mm:ss.
 fn appendTimeString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8)) errors.EllochkaError!void {
     var hour: u16 = 0;
     var minute: u16 = 0;
@@ -156,9 +146,6 @@ fn appendTimeString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u
     buf.appendSlice(allocator, s) catch return errors.RuntimeError.MemoryAllocationFailed;
 }
 
-/// Разбирает "(arg1,arg2,...,argN)" на N срезов токенов по верхнеуровневым
-/// запятым (учитывая вложенные скобки). seg должен начинаться с '(' и
-/// заканчиваться на ')'.
 fn parseArgsInParens(comptime n: usize, seg: []lexer.Token) errors.EllochkaError![n][]lexer.Token {
     if (seg.len < 2 or seg[0].kind != .lparen or seg[seg.len - 1].kind != .rparen) {
         return errors.ParseError.InvalidStatement;
@@ -185,7 +172,6 @@ fn parseArgsInParens(comptime n: usize, seg: []lexer.Token) errors.EllochkaError
     return parts;
 }
 
-/// Разбивает срез токенов на ровно n частей по верхнеуровневым ';'.
 fn splitBySemicolon(comptime n: usize, args: []lexer.Token) errors.EllochkaError![n][]lexer.Token {
     var parts: [n][]lexer.Token = undefined;
     var start: usize = 0;
@@ -211,9 +197,6 @@ fn singleLetterFromTokens(tokens: []lexer.Token) errors.EllochkaError!u8 {
     return InterpreterState.letterIndex(tokens[0].text[0]) orelse errors.ParseError.InvalidVariableName;
 }
 
-/// Считывает одно событие клавиатуры (если оно есть в буфере, без блокировки).
-/// Возвращает null если событий нет, иначе код: ASCII (0-255) либо 256 для
-/// расширенных/управляющих клавиш без ASCII-представления.
 fn peekKeyCode() ?f32 {
     if (builtin.os.tag != .windows) return null;
     const handle = GetStdHandle(STD_INPUT_HANDLE);
@@ -228,12 +211,9 @@ fn peekKeyCode() ?f32 {
             const ascii = rec.Event.KeyEvent.uChar.AsciiChar;
             return if (ascii != 0) @floatFromInt(ascii) else 256.0;
         }
-        // Событие отжатия клавиши или иное — пропускаем, проверяем дальше.
     }
 }
 
-/// Блокирующее ожидание одной клавиши в raw-режиме консоли (без Enter).
-/// Гарантированно восстанавливает исходный режим консоли перед выходом.
 fn blockingReadKeyCode() f32 {
     if (builtin.os.tag != .windows) return 0.0;
     const handle = GetStdHandle(STD_INPUT_HANDLE);
@@ -325,6 +305,33 @@ pub fn execute(
     if (eq(name, "DATA")) {
         return execData(a, toks[1..], st, prog);
     }
+    if (eq(name, "LENF")) {
+        return execLenf(a, toks[1..], st, io);
+    }
+    if (eq(name, "UDAL")) {
+        return execUdal(a, toks[1..], st, io);
+    }
+    if (eq(name, "PATH")) {
+        return execPath(a, toks[1..], st, io);
+    }
+    if (eq(name, "FILE")) {
+        return execFile(a, toks[1..], st, io);
+    }
+    if (eq(name, "FREE")) {
+        return execFree(a, toks[1..], st);
+    }
+    if (eq(name, "SORT")) {
+        return execSort(a, toks[1..], st);
+    }
+    if (eq(name, "TYPE")) {
+        return execType(a, toks[1..], st, io);
+    }
+    if (eq(name, "PUTF")) {
+        return execPutfGetf(a, toks[1..], st, io, true);
+    }
+    if (eq(name, "GETF")) {
+        return execPutfGetf(a, toks[1..], st, io, false);
+    }
 
     if (eq(name, "RADI")) { st.angle_mode = .radians; return .next; }
     if (eq(name, "GRDS")) { st.angle_mode = .degrees; return .next; }
@@ -373,7 +380,6 @@ fn eq(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b);
 }
 
-/// Разбирает токен-число (например, "1", "2", "3") в u8-категорию.
 fn parseCategoryDigit(tok: lexer.Token) errors.EllochkaError!u8 {
     if (tok.kind != .number) return errors.ParseError.InvalidStatement;
     const val = std.fmt.parseInt(u32, tok.text, 10) catch return errors.ParseError.InvalidStatement;
@@ -381,7 +387,6 @@ fn parseCategoryDigit(tok: lexer.Token) errors.EllochkaError!u8 {
     return @intCast(val);
 }
 
-/// INCR A / DECR A — увеличивает/уменьшает простую переменную на 1.
 fn execIncrDecr(
     args: []lexer.Token,
     st: *InterpreterState,
@@ -395,8 +400,6 @@ fn execIncrDecr(
     return .next;
 }
 
-/// KEYS A — без блокировки: если в буфере есть событие клавиши, код в A,
-/// иначе 0. Работает через PeekConsoleInput/ReadConsoleInput (Windows).
 fn execKeys(
     args: []lexer.Token,
     st: *InterpreterState,
@@ -406,9 +409,6 @@ fn execKeys(
     return .next;
 }
 
-/// WAIT / WAIT A / WAIT A# — блокирующее ожидание любой клавиши без Enter
-/// (raw-режим консоли). Если указана переменная — код нажатой клавиши
-/// записывается в неё; '#' переводит символьный код в верхний регистр.
 fn execWait(
     args: []lexer.Token,
     st: *InterpreterState,
@@ -432,7 +432,6 @@ fn execWait(
     return .next;
 }
 
-/// SUMA D;S — сумма элементов одномерного массива D в скаляр S.
 fn execSuma(
     args: []lexer.Token,
     st: *InterpreterState,
@@ -448,8 +447,6 @@ fn execSuma(
     return .next;
 }
 
-/// MINA D;I / MAXA D;I — индекс минимального/максимального элемента.
-/// При совпадении значений возвращается индекс ПЕРВОГО найденного.
 fn execMinMax(
     args: []lexer.Token,
     st: *InterpreterState,
@@ -475,9 +472,6 @@ fn execMinMax(
     return .next;
 }
 
-/// DATA A;B;C — заполнить элементы строкового массива в диапазоне [A,B]
-/// (прямая числовая индексация) строками программы, начиная со строки C
-/// (число) или со следующей строки после метки C (@label).
 fn execData(
     allocator: std.mem.Allocator,
     args: []lexer.Token,
@@ -521,7 +515,6 @@ fn execData(
     return .next;
 }
 
-/// DLIN P;L — определение длины текстовой переменной P, результат в L.
 fn execDlin(
     args: []lexer.Token,
     st: *InterpreterState,
@@ -539,8 +532,6 @@ fn execDlin(
     return .next;
 }
 
-/// FIND P;S;I;N — поиск подстроки S (или кода символа C) в P начиная
-/// с позиции I (1-based), результат (1-based позиция или 0) в N.
 fn execFind(
     allocator: std.mem.Allocator,
     args: []lexer.Token,
@@ -593,10 +584,6 @@ fn execFind(
     return .next;
 }
 
-/// MEMC            — обнулить простые переменные;
-/// MEMC $$         — очистить все элементы строкового массива;
-/// MEMC 1M         — обнулить все элементы одномерного массива M;
-/// MEMC 2K         — обнулить все элементы двумерного массива K.
 fn execMemc(
     args: []lexer.Token,
     st: *InterpreterState,
@@ -631,9 +618,6 @@ fn execMemc(
     return errors.ParseError.ExtensionNotImplemented;
 }
 
-/// SIZE L               — задать размер строкового массива L элементов;
-/// SIZE [K]=A;X;R        — задать размер K для одномерных массивов A,X,R;
-/// SIZE [N,M]=X;Y;W      — задать размер N x M для двумерных массивов X,Y,W.
 fn execSize(
     allocator: std.mem.Allocator,
     args: []lexer.Token,
@@ -719,8 +703,6 @@ fn execSize(
     return .next;
 }
 
-/// UMEM D — уничтожить все одномерные (D=1), двумерные (D=2)
-/// или строковый (D=3) массивы.
 fn execUmem(
     allocator: std.mem.Allocator,
     args: []lexer.Token,
@@ -735,9 +717,6 @@ fn execUmem(
     return .next;
 }
 
-/// CURR 1K / CURR 2K / CURR 3K — записать в переменную K текущий размер
-/// одномерных массивов, число строк двумерных массивов или число
-/// элементов строкового массива соответственно (по официальному help DIKAR v7).
 fn execCurr(
     args: []lexer.Token,
     st: *InterpreterState,
@@ -782,11 +761,6 @@ fn execGoto(
     return .{ .jump = @intCast(target) };
 }
 
-/// Разбирает и выполняет ESLI. Поддерживает три режима:
-///  - числовой:    ESLI X >> Y; C          (';' обязательна перед C)
-///  - диапазон:    ESLI X == {Y,Z} C       (';' перед C не используется)
-///                 ESLI X |= }Y,Z{ C
-///  - строковый:   ESLI $P == 'текст' C    (только ==/|=, ';' не используется)
 fn execEsli(
     allocator: std.mem.Allocator,
     args: []lexer.Token,
@@ -1370,4 +1344,489 @@ fn execAssignment(
     const val = try expr_mod.evaluate(node, st, .{});
     try storeAssignedValue(allocator, st, letter, is_array1d, is_array2d, index1_tokens, index2_tokens, val);
     return .next;
+}
+
+fn matchGlob(name: []const u8, mask: []const u8) bool {
+    var n_idx: usize = 0;
+    var m_idx: usize = 0;
+    var backtrack_n: ?usize = null;
+    var backtrack_m: ?usize = null;
+
+    while (n_idx < name.len) {
+        if (m_idx < mask.len and (mask[m_idx] == '?' or std.ascii.toLower(name[n_idx]) == std.ascii.toLower(mask[m_idx]))) {
+            n_idx += 1;
+            m_idx += 1;
+        } else if (m_idx < mask.len and mask[m_idx] == '*') {
+            backtrack_m = m_idx;
+            backtrack_n = n_idx;
+            m_idx += 1;
+        } else if (backtrack_m) |bm| {
+            m_idx = bm + 1;
+            backtrack_n.? += 1;
+            n_idx = backtrack_n.?;
+        } else {
+            return false;
+        }
+    }
+
+    while (m_idx < mask.len and mask[m_idx] == '*') : (m_idx += 1) {}
+    return m_idx == mask.len;
+}
+
+fn writeToDollarTarget(st: *InterpreterState, ch: u8, value: []const u8) errors.EllochkaError!void {
+    if (ch >= '0' and ch <= '9') {
+        if (value.len > state_mod.MAX_DYNAMIC_STRING_LEN) return errors.RuntimeError.StringTooLong;
+        st.dynamic_strings[ch - '0'].set(st.allocator, value) catch return errors.RuntimeError.MemoryAllocationFailed;
+    } else {
+        try st.setStaticString(ch, value);
+    }
+}
+
+const SortableString = struct { bytes: [state_mod.STATIC_STRING_LEN]u8, len: u8 };
+
+fn insertionSortStrings(items: []SortableString, descending: bool) void {
+    var i: usize = 1;
+    while (i < items.len) : (i += 1) {
+        const key = items[i];
+        var j = i;
+        while (j > 0) {
+            const a = items[j - 1];
+            const order = std.mem.order(u8, a.bytes[0..a.len], key.bytes[0..key.len]);
+            const should_move = if (descending) order == .lt else order == .gt;
+            if (!should_move) break;
+            items[j] = items[j - 1];
+            j -= 1;
+        }
+        items[j] = key;
+    }
+}
+
+fn insertionSortFloats(items: []f32, descending: bool) void {
+    var i: usize = 1;
+    while (i < items.len) : (i += 1) {
+        const key = items[i];
+        var j = i;
+        while (j > 0) {
+            const should_move = if (descending) items[j - 1] < key else items[j - 1] > key;
+            if (!should_move) break;
+            items[j] = items[j - 1];
+            j -= 1;
+        }
+        items[j] = key;
+    }
+}
+
+fn execLenf(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+    io: std.Io,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(2, args);
+    const path_bytes = try resolveStringOperand(parts[0], st);
+    const path_copy = allocator.dupe(u8, path_bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
+    const l_letter = try singleLetterFromTokens(parts[1]);
+
+    const stat_result = std.Io.Dir.cwd().statFile(io, path_copy, .{}) catch {
+        st.scalars[l_letter] = -1.0;
+        return .next;
+    };
+    st.scalars[l_letter] = @floatFromInt(stat_result.size);
+    return .next;
+}
+
+fn execUdal(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+    io: std.Io,
+) errors.EllochkaError!ExecResult {
+    const path_bytes = try resolveStringOperand(args, st);
+    const path_copy = allocator.dupe(u8, path_bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
+    std.Io.Dir.cwd().deleteFile(io, path_copy) catch |e| switch (e) {
+        error.FileNotFound => {},
+        else => return errors.RuntimeError.FileError,
+    };
+    return .next;
+}
+
+fn execPath(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+    io: std.Io,
+) errors.EllochkaError!ExecResult {
+    if (args.len != 2 or args[0].kind != .dollar) return errors.ParseError.InvalidStatement;
+    const ch = dollarTargetChar(args[1]) orelse return errors.ParseError.InvalidVariableName;
+    const current = try st.resolveStringBytes(ch);
+    const current_copy = allocator.dupe(u8, current) catch return errors.RuntimeError.MemoryAllocationFailed;
+
+    const sep_idx = std.mem.lastIndexOfAny(u8, current_copy, "/\\");
+    const dir_part: []const u8 = if (sep_idx) |si| current_copy[0 .. si + 1] else ".";
+
+    const resolved = std.Io.Dir.cwd().realPathFileAlloc(io, dir_part, allocator) catch {
+        try writeToDollarTarget(st, ch, "");
+        return .next;
+    };
+
+    var final_buf = std.ArrayListUnmanaged(u8){};
+    final_buf.appendSlice(allocator, resolved) catch return errors.RuntimeError.MemoryAllocationFailed;
+    if (final_buf.items.len == 0 or final_buf.items[final_buf.items.len - 1] != '\\') {
+        final_buf.append(allocator, '\\') catch return errors.RuntimeError.MemoryAllocationFailed;
+    }
+    try writeToDollarTarget(st, ch, final_buf.items);
+    return .next;
+}
+
+fn execFile(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+    io: std.Io,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(2, args);
+    const mask_bytes = try resolveStringOperand(parts[0], st);
+    const mask_copy = allocator.dupe(u8, mask_bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
+    const n_letter = try singleLetterFromTokens(parts[1]);
+
+    if (st.static_strings.len == 0) return errors.RuntimeError.ArrayNotSized;
+
+    const sep_idx = std.mem.lastIndexOfAny(u8, mask_copy, "/\\");
+    const dir_path: []const u8 = if (sep_idx) |si| (if (si == 0) "/" else mask_copy[0..si]) else ".";
+    const pattern: []const u8 = if (sep_idx) |si| mask_copy[si + 1 ..] else mask_copy;
+
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch {
+        st.scalars[n_letter] = -1.0;
+        return .next;
+    };
+    defer dir.close(io);
+
+    var written: usize = 0;
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (!matchGlob(entry.name, pattern)) continue;
+        if (written >= st.static_strings.len) break;
+        written += 1;
+        try st.setStaticStringByIndex(written, entry.name);
+    }
+    st.scalars[n_letter] = @floatFromInt(written);
+    return .next;
+}
+
+extern "kernel32" fn GetDiskFreeSpaceExA(
+    lpDirectoryName: ?[*:0]const u8,
+    lpFreeBytesAvailable: ?*u64,
+    lpTotalNumberOfBytes: ?*u64,
+    lpTotalNumberOfFreeBytes: ?*u64,
+) callconv(.winapi) i32;
+
+fn execFree(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(2, args);
+    var dp = expr_mod.Parser.init(allocator, parts[0]);
+    const dnode = try dp.parseExpr();
+    const dval = try expr_mod.evaluate(dnode, st, .{});
+    const d: i32 = @intFromFloat(dval);
+    const l_letter = try singleLetterFromTokens(parts[1]);
+
+    var free_bytes: u64 = 0;
+    var ok = false;
+    if (builtin.os.tag == .windows) {
+        if (d == 0) {
+            ok = GetDiskFreeSpaceExA(null, &free_bytes, null, null) != 0;
+        } else if (d >= 1 and d <= 26) {
+            const letter_char: u8 = @intCast(@as(i32, 'A') + (d - 1));
+            var path_buf: [3:0]u8 = .{ letter_char, ':', '\\' };
+            ok = GetDiskFreeSpaceExA(&path_buf, &free_bytes, null, null) != 0;
+        }
+    }
+    st.scalars[l_letter] = if (ok) @floatFromInt(free_bytes) else -1.0;
+    return .next;
+}
+
+fn execSort(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    const parts = try splitBySemicolon(3, args);
+    const target_tokens = parts[0];
+
+    var np = expr_mod.Parser.init(allocator, parts[1]);
+    const nnode = try np.parseExpr();
+    const nval = try expr_mod.evaluate(nnode, st, .{});
+    if (nval < 0) return errors.ParseError.InvalidStatement;
+    const count: usize = @intFromFloat(nval);
+
+    var fp = expr_mod.Parser.init(allocator, parts[2]);
+    const fnode = try fp.parseExpr();
+    const fval = try expr_mod.evaluate(fnode, st, .{});
+    const descending = fval < 0;
+
+    const is_whole_array = target_tokens.len >= 1 and target_tokens[0].kind == .dollar and
+        (target_tokens.len == 1 or (target_tokens.len == 2 and target_tokens[1].kind == .dollar));
+
+    if (is_whole_array) {
+        if (count > st.static_strings.len) return errors.RuntimeError.IndexOutOfBounds;
+        var items = allocator.alloc(SortableString, count) catch return errors.RuntimeError.MemoryAllocationFailed;
+        for (0..count) |i| items[i] = .{ .bytes = st.static_strings[i], .len = st.static_strings_lens[i] };
+        insertionSortStrings(items, descending);
+        for (0..count) |i| {
+            st.static_strings[i] = items[i].bytes;
+            st.static_strings_lens[i] = items[i].len;
+        }
+        return .next;
+    }
+
+    if (target_tokens.len == 1 and target_tokens[0].kind == .identifier and target_tokens[0].text.len == 1) {
+        const letter = InterpreterState.letterIndex(target_tokens[0].text[0]) orelse return errors.ParseError.InvalidVariableName;
+        const arr = st.arrays1d[letter];
+        if (count > arr.len) return errors.RuntimeError.IndexOutOfBounds;
+        insertionSortFloats(arr[0..count], descending);
+        return .next;
+    }
+
+    return errors.ParseError.InvalidStatement;
+}
+
+fn appendListSegmentToBuffer(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    segment: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!void {
+    if (segment.len == 1 and segment[0].kind == .string_literal) {
+        buf.appendSlice(allocator, segment[0].text) catch return errors.RuntimeError.MemoryAllocationFailed;
+        return;
+    }
+    if (segment.len == 2 and segment[0].kind == .dollar) {
+        if (dollarTargetChar(segment[1])) |ch| {
+            const bytes = try st.resolveStringBytes(ch);
+            buf.appendSlice(allocator, bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
+            return;
+        }
+    }
+    var parser = expr_mod.Parser.init(allocator, segment);
+    const node = try parser.parseExpr();
+    const val = try expr_mod.evaluate(node, st, .{});
+    var nb: [64]u8 = undefined;
+    const s = formatScalar(&nb, val);
+    buf.appendSlice(allocator, s) catch return errors.RuntimeError.MemoryAllocationFailed;
+}
+
+fn execType(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+    io: std.Io,
+) errors.EllochkaError!ExecResult {
+    var semi_pos: ?usize = null;
+    for (args, 0..) |t, i| {
+        if (t.kind == .semicolon) { semi_pos = i; break; }
+    }
+    const sep = semi_pos orelse return errors.ParseError.InvalidStatement;
+    const f_tokens = args[0..sep];
+    const rest = args[sep + 1 ..];
+
+    const path_bytes = try resolveStringOperand(f_tokens, st);
+    const path_copy = allocator.dupe(u8, path_bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
+
+    var buf = std.ArrayListUnmanaged(u8){};
+
+    if (rest.len == 2 and rest[0].kind == .number and rest[1].kind == .identifier and rest[1].text.len == 1) {
+        const category = try parseCategoryDigit(rest[0]);
+        const letter = InterpreterState.letterIndex(rest[1].text[0]) orelse return errors.ParseError.InvalidVariableName;
+        if (category == 1) {
+            const arr = st.arrays1d[letter];
+            for (arr) |v| {
+                var nb: [64]u8 = undefined;
+                const s = formatScalar(&nb, v);
+                buf.appendSlice(allocator, s) catch return errors.RuntimeError.MemoryAllocationFailed;
+                buf.append(allocator, '\n') catch return errors.RuntimeError.MemoryAllocationFailed;
+            }
+        } else if (category == 2) {
+            const arr = st.arrays2d[letter];
+            var r: usize = 0;
+            while (r < arr.rows) : (r += 1) {
+                var c: usize = 0;
+                while (c < arr.cols) : (c += 1) {
+                    var nb: [64]u8 = undefined;
+                    const s = formatScalar(&nb, arr.data[arr.indexOf(r, c)]);
+                    buf.appendSlice(allocator, s) catch return errors.RuntimeError.MemoryAllocationFailed;
+                    if (c + 1 < arr.cols) buf.append(allocator, '\t') catch return errors.RuntimeError.MemoryAllocationFailed;
+                }
+                buf.append(allocator, '\n') catch return errors.RuntimeError.MemoryAllocationFailed;
+            }
+        } else {
+            return errors.ParseError.InvalidStatement;
+        }
+    } else if (rest.len >= 2 and rest[0].kind == .dollar and rest[1].kind == .dollar) {
+        var p_val: f32 = 0.0;
+        var s_val: f32 = 0.0;
+        if (rest.len > 2) {
+            var idx: usize = 2;
+            if (idx < rest.len and rest[idx].kind == .semicolon) idx += 1;
+            var p_semi: ?usize = null;
+            var k = idx;
+            while (k < rest.len) {
+                if (rest[k].kind == .semicolon) { p_semi = k; break; }
+                k += 1;
+            }
+            const p_end = p_semi orelse rest.len;
+            if (p_end > idx) {
+                var pp = expr_mod.Parser.init(allocator, rest[idx..p_end]);
+                const pnode = try pp.parseExpr();
+                p_val = try expr_mod.evaluate(pnode, st, .{});
+            }
+            if (p_semi) |ps| {
+                const s_tokens = rest[ps + 1 ..];
+                if (s_tokens.len > 0) {
+                    var sp = expr_mod.Parser.init(allocator, s_tokens);
+                    const snode = try sp.parseExpr();
+                    s_val = try expr_mod.evaluate(snode, st, .{});
+                }
+            }
+        }
+        const trim_trailing = p_val != 0.0;
+        const include_empty = s_val != 0.0;
+        for (st.static_strings, 0..) |row, i| {
+            const len = st.static_strings_lens[i];
+            var line: []const u8 = row[0..len];
+            if (trim_trailing) line = std.mem.trimEnd(u8, line, " ");
+            if (line.len == 0 and !include_empty) continue;
+            buf.appendSlice(allocator, line) catch return errors.RuntimeError.MemoryAllocationFailed;
+            buf.append(allocator, '\n') catch return errors.RuntimeError.MemoryAllocationFailed;
+        }
+    } else {
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i <= rest.len) {
+            if (i == rest.len or rest[i].kind == .semicolon) {
+                const segment = rest[start..i];
+                if (segment.len > 0) {
+                    try appendListSegmentToBuffer(allocator, &buf, segment, st);
+                }
+                start = i + 1;
+            }
+            i += 1;
+        }
+        if (!(rest.len > 0 and rest[rest.len - 1].kind == .backslash)) {
+            buf.append(allocator, '\n') catch return errors.RuntimeError.MemoryAllocationFailed;
+        }
+    }
+
+    var file = std.Io.Dir.cwd().createFile(io, path_copy, .{ .truncate = false, .read = true }) catch return errors.RuntimeError.FileError;
+    defer file.close(io);
+    const end_pos = file.length(io) catch return errors.RuntimeError.FileError;
+    file.writePositionalAll(io, buf.items, end_pos) catch return errors.RuntimeError.FileError;
+    return .next;
+}
+
+fn execPutfGetf(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+    io: std.Io,
+    is_write: bool,
+) errors.EllochkaError!ExecResult {
+    var semi_pos: ?usize = null;
+    for (args, 0..) |t, i| {
+        if (t.kind == .semicolon) { semi_pos = i; break; }
+    }
+    const sep = semi_pos orelse return errors.ParseError.InvalidStatement;
+    const f_tokens = args[0..sep];
+    const rest = args[sep + 1 ..];
+
+    const path_bytes = try resolveStringOperand(f_tokens, st);
+    const path_copy = allocator.dupe(u8, path_bytes) catch return errors.RuntimeError.MemoryAllocationFailed;
+
+    if (rest.len >= 3 and rest[0].kind == .number and rest[1].kind == .identifier and rest[1].text.len == 1 and rest[2].kind == .semicolon) {
+        const category = try parseCategoryDigit(rest[0]);
+        if (category != 1) return errors.ParseError.ExtensionNotImplemented;
+        const letter = InterpreterState.letterIndex(rest[1].text[0]) orelse return errors.ParseError.InvalidVariableName;
+
+        const params = try splitBySemicolon(3, rest[3..]);
+        var dp = expr_mod.Parser.init(allocator, params[0]);
+        const dnode = try dp.parseExpr();
+        const dval = try expr_mod.evaluate(dnode, st, .{});
+        const d: usize = @intFromFloat(dval);
+        if (d != 4) return errors.ParseError.ExtensionNotImplemented;
+
+        var bp = expr_mod.Parser.init(allocator, params[1]);
+        const bnode = try bp.parseExpr();
+        const bval = try expr_mod.evaluate(bnode, st, .{});
+        const b: usize = @intFromFloat(bval);
+
+        var lp = expr_mod.Parser.init(allocator, params[2]);
+        const lnode = try lp.parseExpr();
+        const lval = try expr_mod.evaluate(lnode, st, .{});
+        const l: usize = @intFromFloat(lval);
+        if (l == 0) return errors.ParseError.InvalidStatement;
+
+        const count = st.array1d_len;
+        var arr = st.arrays1d[letter];
+        if (arr.len < count) return errors.RuntimeError.ArrayNotSized;
+
+        if (is_write) {
+            var file = std.Io.Dir.cwd().createFile(io, path_copy, .{ .truncate = false, .read = true }) catch return errors.RuntimeError.FileError;
+            defer file.close(io);
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                const pos = i * l + b;
+                const bytes: [4]u8 = @bitCast(arr[i]);
+                file.writePositionalAll(io, bytes[0..], pos) catch return errors.RuntimeError.FileError;
+            }
+        } else {
+            var file = std.Io.Dir.cwd().openFile(io, path_copy, .{}) catch return errors.RuntimeError.FileError;
+            defer file.close(io);
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                const pos = i * l + b;
+                var bytes: [4]u8 = undefined;
+                const n = file.readPositionalAll(io, bytes[0..], pos) catch return errors.RuntimeError.FileError;
+                if (n < 4) return errors.RuntimeError.FileError;
+                arr[i] = @bitCast(bytes);
+            }
+        }
+        return .next;
+    }
+
+    if (rest.len >= 3 and rest[0].kind == .dollar and rest[1].kind != .dollar and rest[2].kind == .semicolon) {
+        const p_ch = dollarTargetChar(rest[1]) orelse return errors.ParseError.InvalidVariableName;
+        const params = try splitBySemicolon(2, rest[3..]);
+
+        var rp = expr_mod.Parser.init(allocator, params[0]);
+        const rnode = try rp.parseExpr();
+        const rval = try expr_mod.evaluate(rnode, st, .{});
+        const r: usize = @intFromFloat(rval);
+
+        var bp = expr_mod.Parser.init(allocator, params[1]);
+        const bnode = try bp.parseExpr();
+        const bval = try expr_mod.evaluate(bnode, st, .{});
+        const b: usize = @intFromFloat(bval);
+
+        if (is_write) {
+            const content = try st.resolveStringBytes(p_ch);
+            const content_copy = allocator.dupe(u8, content) catch return errors.RuntimeError.MemoryAllocationFailed;
+            var out_buf = allocator.alloc(u8, r) catch return errors.RuntimeError.MemoryAllocationFailed;
+            const take = @min(content_copy.len, r);
+            @memcpy(out_buf[0..take], content_copy[0..take]);
+            if (r > take) @memset(out_buf[take..r], 0);
+            var file = std.Io.Dir.cwd().createFile(io, path_copy, .{ .truncate = false, .read = true }) catch return errors.RuntimeError.FileError;
+            defer file.close(io);
+            file.writePositionalAll(io, out_buf, b) catch return errors.RuntimeError.FileError;
+        } else {
+            var in_buf = allocator.alloc(u8, r) catch return errors.RuntimeError.MemoryAllocationFailed;
+            var file = std.Io.Dir.cwd().openFile(io, path_copy, .{}) catch return errors.RuntimeError.FileError;
+            defer file.close(io);
+            const n = file.readPositionalAll(io, in_buf, b) catch return errors.RuntimeError.FileError;
+            try writeToDollarTarget(st, p_ch, in_buf[0..n]);
+        }
+        return .next;
+    }
+
+    return errors.ParseError.ExtensionNotImplemented;
 }
