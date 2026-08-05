@@ -48,7 +48,7 @@ pub fn load(allocator: std.mem.Allocator, source: []const u8) !Program {
             if (line.len == 0 or lexer.isCommentLine(line)) {
                 try prog.lines.append(allocator, null);
             } else if (lexer.isLabelLine(line)) {
-                if (line.len > MAX_LINE_LEN) {
+                if (lineCharLen(line) > MAX_LINE_LEN) {
                     return errors.ParseError.LineTooLong;
                 }
                 const label_name_raw = line[1..];
@@ -57,7 +57,7 @@ pub fn load(allocator: std.mem.Allocator, source: []const u8) !Program {
                 try prog.labels.put(allocator, upper, line_number + 1);
                 try prog.lines.append(allocator, null);
             } else {
-                if (line.len > MAX_LINE_LEN) {
+                if (lineCharLen(line) > MAX_LINE_LEN) {
                     return errors.ParseError.LineTooLong;
                 }
                 try prog.lines.append(allocator, line);
@@ -89,3 +89,13 @@ pub fn load(allocator: std.mem.Allocator, source: []const u8) !Program {
         return self.labels.get(buf[0..name.len]);
     }
 };
+
+/// Считает длину строки в Unicode-кодпоинтах (символах), а не в байтах,
+/// как требует спецификация языка ("не более 75 символов"). Кириллица
+/// в UTF-8 занимает 2 байта на символ, поэтому проверка по байтам
+/// ошибочно бракует валидные строки с кириллицей. При невалидном UTF-8
+/// (не должно происходить для .ela/.ell-файлов) откатываемся на длину
+/// в байтах, чтобы не уронить загрузку программы по нашей же вине.
+fn lineCharLen(line: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(line) catch line.len;
+}

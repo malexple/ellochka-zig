@@ -173,6 +173,10 @@ pub const Parser = struct {
             const operand = try self.parseUnary();
             return self.alloc(.{ .negate = operand });
         }
+        if (self.peek().kind == .plus) {
+            _ = self.advance();
+            return self.parseUnary();
+        }
         return self.parsePrimary();
     }
 

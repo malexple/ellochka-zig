@@ -1134,11 +1134,17 @@ fn execList(
     stdout: anytype,
 ) errors.EllochkaError!ExecResult {
     var newline = true;
+    var effective_args = args;
+    if (args.len > 0 and args[args.len - 1].kind == .backslash) {
+        newline = false;
+        effective_args = args[0 .. args.len - 1];
+    }
+
     var start: usize = 0;
     var i: usize = 0;
-    while (i <= args.len) {
-        if (i == args.len or args[i].kind == .semicolon) {
-            const segment = args[start..i];
+    while (i <= effective_args.len) {
+        if (i == effective_args.len or effective_args[i].kind == .semicolon) {
+            const segment = effective_args[start..i];
             if (segment.len > 0) {
                 try printSegment(allocator, segment, st, stdout);
             }
@@ -1146,7 +1152,6 @@ fn execList(
         }
         i += 1;
     }
-    if (args.len > 0 and args[args.len - 1].kind == .backslash) newline = false;
     if (newline) stdout.print("\n", .{}) catch {};
     return .next;
 }
@@ -1181,11 +1186,16 @@ fn execVvod(
     stdout: anytype,
     io: std.Io,
 ) errors.EllochkaError!ExecResult {
+    var effective_args = args;
+    if (args.len > 0 and args[args.len - 1].kind == .backslash) {
+        effective_args = args[0 .. args.len - 1];
+    }
+
     var start: usize = 0;
     var i: usize = 0;
-    while (i <= args.len) {
-        if (i == args.len or args[i].kind == .semicolon) {
-            const segment = args[start..i];
+    while (i <= effective_args.len) {
+        if (i == effective_args.len or effective_args[i].kind == .semicolon) {
+            const segment = effective_args[start..i];
             if (segment.len > 0) {
                 try readSegment(allocator, segment, st, stdout, io);
             }
@@ -1925,11 +1935,18 @@ fn execType(
             buf.append(allocator, '\n') catch return errors.RuntimeError.MemoryAllocationFailed;
         }
     } else {
+        var effective_rest = rest;
+        var suppress_newline = false;
+        if (rest.len > 0 and rest[rest.len - 1].kind == .backslash) {
+            suppress_newline = true;
+            effective_rest = rest[0 .. rest.len - 1];
+        }
+
         var start: usize = 0;
         var i: usize = 0;
-        while (i <= rest.len) {
-            if (i == rest.len or rest[i].kind == .semicolon) {
-                const segment = rest[start..i];
+        while (i <= effective_rest.len) {
+            if (i == effective_rest.len or effective_rest[i].kind == .semicolon) {
+                const segment = effective_rest[start..i];
                 if (segment.len > 0) {
                     try appendListSegmentToBuffer(allocator, &buf, segment, st);
                 }
@@ -1937,7 +1954,7 @@ fn execType(
             }
             i += 1;
         }
-        if (!(rest.len > 0 and rest[rest.len - 1].kind == .backslash)) {
+        if (!suppress_newline) {
             buf.append(allocator, '\n') catch return errors.RuntimeError.MemoryAllocationFailed;
         }
     }
