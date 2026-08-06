@@ -1,0 +1,215 @@
+CLSC
+W=40
+B=18
+
+@menu
+CLSC
+STRO 5
+STLB 15
+LIST 'ЗМЕЙКА'
+STRO 7
+STLB 6
+LIST 'Enter - Старт   Esc - Выход'
+WAIT K
+ESLI K == 13; @startgame
+ESLI K == 27; @quitnow
+GOTO @menu
+
+@startgame
+CLSC
+SIZE [50]=X
+SIZE [50]=Y
+L=5
+D=4
+S=0
+
+! --- рамка поля ---
+I=1
+@topborder
+STRO 2
+STLB I
+LIST '-'\
+I=I+1
+ESLI I <= W+2; @topborder
+
+I=1
+@botborder
+STRO B+3
+STLB I
+LIST '-'\
+I=I+1
+ESLI I <= W+2; @botborder
+
+I=1
+@sideborder
+STRO I+2
+STLB 1
+LIST '|'\
+STRO I+2
+STLB W+2
+LIST '|'\
+I=I+1
+ESLI I <= B; @sideborder
+
+! --- начальное тело змейки ---
+I=1
+@init
+X[I]=9
+Y[I]=11-I
+I=I+1
+ESLI I <= L; @init
+
+I=1
+@draw0
+STRO X[I]+2
+STLB Y[I]+1
+LIST '#'\
+I=I+1
+ESLI I <= L; @draw0
+
+! --- первая еда ---
+F=&INT(&RAN*B)+1
+G=&INT(&RAN*W)+1
+STRO F+2
+STLB G+1
+LIST '@'\
+
+@loop
+KEYS K
+ESLI K == 293; @dirleft
+ESLI K == 294; @dirup
+ESLI K == 295; @dirright
+ESLI K == 296; @dirdown
+GOTO @move
+
+@dirleft
+ESLI D == 4; @move
+D=3
+GOTO @move
+
+@dirup
+ESLI D == 2; @move
+D=1
+GOTO @move
+
+@dirright
+ESLI D == 3; @move
+D=4
+GOTO @move
+
+@dirdown
+ESLI D == 1; @move
+D=2
+GOTO @move
+
+@move
+T=X[L]
+U=Y[L]
+
+N=X[1]
+M=Y[1]
+ESLI D == 1; @deltaup
+ESLI D == 2; @deltadown
+ESLI D == 3; @deltaleft
+ESLI D == 4; @deltaright
+
+@deltaup
+N=N-1
+GOTO @checkbounds
+@deltadown
+N=N+1
+GOTO @checkbounds
+@deltaleft
+M=M-1
+GOTO @checkbounds
+@deltaright
+M=M+1
+GOTO @checkbounds
+
+@checkbounds
+ESLI N << 1; @gameover
+ESLI N >> B; @gameover
+ESLI M << 1; @gameover
+ESLI M >> W; @gameover
+
+I=1
+@selfcheck
+ESLI X[I] == N; @selfmaybe
+GOTO @selfnext
+@selfmaybe
+ESLI Y[I] == M; @gameover
+@selfnext
+I=I+1
+ESLI I <= L; @selfcheck
+
+ESLI N == F; @maybeeat
+GOTO @noeat
+
+@maybeeat
+ESLI M == G; @doeat
+GOTO @noeat
+
+@doeat
+S=S+1
+ESLI L >= 50; @aftergrow
+L=L+1
+GOTO @aftergrow
+
+@noeat
+STRO T+2
+STLB U+1
+LIST ' '\
+GOTO @aftergrow
+
+@aftergrow
+I=L
+@shift
+ESLI I <= 1; @sethead
+X[I]=X[I-1]
+Y[I]=Y[I-1]
+I=I-1
+GOTO @shift
+
+@sethead
+X[1]=N
+Y[1]=M
+
+STRO N+2
+STLB M+1
+LIST '#'\
+
+ESLI N == F; @respcheck
+GOTO @scoreline
+
+@respcheck
+ESLI M == G; @respawn
+GOTO @scoreline
+
+@respawn
+F=&INT(&RAN*B)+1
+G=&INT(&RAN*W)+1
+STRO F+2
+STLB G+1
+LIST '@'\
+
+@scoreline
+STRO B+5
+STLB 1
+LIST 'Счёт: '; S; ' Длина: '; L
+
+SLEP 150
+GOTO @loop
+
+@gameover
+STRO B+5
+STLB 1
+LIST 'Игра окончена! Счёт: '; S; ' Длина: '; L
+STRO B+6
+STLB 1
+LIST 'Нажмите любую клавишу...'
+WAIT K
+GOTO @menu
+
+@quitnow
+CLSC
+EXIT
