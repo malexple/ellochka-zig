@@ -296,14 +296,13 @@ fn drainPendingInput() void {
     }
 }
 
-pub fn execute(
-    allocator: std.mem.Allocator,
-    line: []const u8,
-    st: *InterpreterState,
-    prog: *const Program,
-    stdout: anytype,
-    io: std.Io,
-) errors.EllochkaError!ExecResult {
+pub fn execute(allocator: std.mem.Allocator, line: []const u8, st: *InterpreterState, prog: *const Program, stdout: anytype, io: std.Io) errors.EllochkaError!ExecResult {
+    if (line.len > 0 and line[0] == '!') {
+        if (eq(line, "!nul")) { st.zero_div_mode = .nul; return .next; }
+        if (eq(line, "!one")) { st.zero_div_mode = .one; return .next; }
+        if (eq(line, "!err")) { st.zero_div_mode = .err; return .next; }
+        return .next;
+    }
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();

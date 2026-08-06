@@ -67,6 +67,7 @@ pub const DEFAULT_PALETTE = [16]u32{
 };
 
 pub const InterpreterState = struct {
+    pub const ZeroDivMode = enum { err, nul, one };
     allocator: std.mem.Allocator,
 
     scalars: [NUM_LETTERS]f32 = [_]f32{0.0} ** NUM_LETTERS,
@@ -83,6 +84,7 @@ pub const InterpreterState = struct {
 
     angle_mode: AngleMode = .radians,
     ordinate_direction: OrdinateDirection = .up,
+    zero_div_mode: ZeroDivMode = .err,
 
     program_counter: usize = 1,
     should_exit: bool = false,

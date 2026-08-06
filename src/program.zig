@@ -45,7 +45,7 @@ pub fn load(allocator: std.mem.Allocator, source: []const u8) !Program {
         while (iter.next()) |raw_line| {
             const line = lexer.trimLine(raw_line);
 
-            if (line.len == 0 or lexer.isCommentLine(line)) {
+            if (line.len == 0 or (lexer.isCommentLine(line) and !lexer.isMetaCommandLine(line))) {
                 try prog.lines.append(allocator, null);
             } else if (lexer.isLabelLine(line)) {
                 if (lineCharLen(line) > MAX_LINE_LEN) {

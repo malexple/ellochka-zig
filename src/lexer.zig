@@ -233,3 +233,9 @@ pub fn isCommentLine(line: []const u8) bool {
 pub fn isLabelLine(line: []const u8) bool {
     return line.len > 0 and line[0] == '@';
 }
+
+pub fn isMetaCommandLine(line: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(line, "!nul") or
+        std.ascii.eqlIgnoreCase(line, "!one") or
+        std.ascii.eqlIgnoreCase(line, "!err");
+}

@@ -9,17 +9,6 @@ const graphics = @import("graphics.zig");
 
 /// Включает интерпретацию ANSI/VT escape-последовательностей (\x1B[...)
 /// для стандартного вывода в консоли Windows.
-///
-/// Без этого в "родном" conhost.exe (обычный cmd.exe/PowerShell без
-/// Windows Terminal) операторы CLSC/CFON/CSIM/STRO/STLB будут печатать
-/// сырые байты escape-кодов как текст (например "[2J[H") вместо того,
-/// чтобы очищать экран/менять цвет. В IntelliJ IDEA, VS Code, Windows
-/// Terminal ANSI-коды интерпретируются самим эмулятором терминала,
-/// поэтому там проблема не проявляется без этого вызова.
-///
-/// Безопасно вызывать всегда: если вывод перенаправлен в файл/пайп
-/// (не консоль), GetConsoleMode просто вернёт ошибку, и функция
-/// тихо завершится без эффекта.
 fn enableAnsiEscapes() void {
     if (builtin.os.tag != .windows) return;
     const windows = std.os.windows;
@@ -34,18 +23,7 @@ fn enableAnsiEscapes() void {
     _ = windows.kernel32.SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 }
 
-/// Переключает кодовую страницу консоли Windows на UTF-8 (65001) —
-/// и для вывода, и для ввода.
-///
-/// Мы всегда пишем/читаем строки в UTF-8 (исходники .ell/.ela, LIST,
-/// VVOD и т.д.), но родной cmd.exe по умолчанию использует старую
-/// OEM-кодировку (обычно 866 для русской локали) — из-за этого
-/// кириллица превращается в "кракозябры", если пользователь не
-/// выполнил вручную "chcp 65001" перед запуском. Этот вызов делает
-/// то же самое программно при старте, один раз.
-///
-/// Безопасно вызывать всегда: на не-Windows и при отсутствии
-/// консоли (вывод в файл/пайп) вызовы просто ничего не меняют.
+/// Переключает кодовую страницу консоли Windows на UTF-8 (65001).
 fn enableUtf8Console() void {
     if (builtin.os.tag != .windows) return;
     const kernel32 = struct {
@@ -57,7 +35,17 @@ fn enableUtf8Console() void {
     _ = kernel32.SetConsoleCP(CP_UTF8);
 }
 
-pub fn main() !void {
+/// Основная логика интерпретатора. Возвращает код завершения процесса:
+/// 0 — программа успешно доработала до EXIT/STOP или до конца файла;
+/// 1 — неверные аргументы командной строки, ошибка открытия/чтения
+///     файла, ошибка загрузки программы, ошибка выполнения на
+///     конкретной строке, либо превышен лимит шагов исполнения
+///     (что почти наверняка означает бесконечный цикл в программе).
+///
+/// Так main() может дать вызывающему коду (batch-скрипту, CI и т.д.)
+/// возможность отличить успешный прогон от неудачного, не парся текст
+/// сообщений об ошибках.
+fn run() !u8 {
     enableAnsiEscapes();
     enableUtf8Console();
 
@@ -79,14 +67,14 @@ pub fn main() !void {
 
     if (args.len < 2) {
         try stdout.print("Использование: ellochka <файл-программы> [аргумент]\n", .{});
-        return;
+        return 1;
     }
 
     const path = args[1];
     const cwd = std.Io.Dir.cwd();
     const file = cwd.openFile(io, path, .{}) catch |err| {
         try stdout.print("Ошибка открытия файла '{s}': {}\n", .{ path, err });
-        return;
+        return 1;
     };
     defer file.close(io);
 
@@ -94,13 +82,13 @@ pub fn main() !void {
     var file_reader: std.Io.File.Reader = .init(file, io, &read_buffer);
     const source = file_reader.interface.allocRemaining(allocator, .limited(1024 * 1024)) catch |err| {
         try stdout.print("Ошибка чтения файла '{s}': {}\n", .{ path, err });
-        return;
+        return 1;
     };
     defer allocator.free(source);
 
     var prog = program_mod.Program.load(allocator, source) catch |err| {
         try stdout.print("Ошибка загрузки программы: {}\n", .{err});
-        return;
+        return 1;
     };
     defer prog.deinit();
 
@@ -114,11 +102,13 @@ pub fn main() !void {
     st.program_counter = 1;
     var steps: u64 = 0;
     const max_steps: u64 = 10_000_000;
+    var had_error = false;
 
     while (st.program_counter <= state_mod.MAX_PROGRAM_LINES) {
         steps += 1;
         if (steps > max_steps) {
             try stdout.print("\nПредупреждение: превышен лимит шагов исполнения ({d}).\n", .{max_steps});
+            had_error = true;
             break;
         }
 
@@ -129,15 +119,10 @@ pub fn main() !void {
                     "\nОшибка выполнения на строке {d}: {s}\n> {s}\n",
                     .{ st.program_counter, @errorName(err), line },
                 );
+                had_error = true;
                 break;
             };
 
-            // Сбрасываем буфер вывода после КАЖДОЙ выполненной строки.
-            // Без этого текст от LIST/STRO/... оседает в 4КБ-буфере и не
-            // появляется на экране, если следующей командой идёт
-            // блокирующий KEYS/WAIT (или программа просто долго крутится
-            // в цикле без явного flush) — пользователь видит пустой экран,
-            // хотя программа уже давно что-то напечатала.
             try stdout.flush();
 
             switch (result) {
@@ -157,4 +142,10 @@ pub fn main() !void {
     }
 
     try stdout.flush();
+    return if (had_error) 1 else 0;
+}
+
+pub fn main() !void {
+    const code = try run();
+    std.process.exit(code);
 }

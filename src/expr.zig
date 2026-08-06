@@ -315,7 +315,16 @@ pub fn evaluate(
                 '+' => l + r,
                 '-' => l - r,
                 '*' => l * r,
-                '/' => if (r == 0) errors.RuntimeError.DivisionByZero else l / r,
+                '/' => if (r == 0) blk: {
+                    if (l == 0) {
+                        break :blk switch (st.zero_div_mode) {
+                            .nul => @as(f32, 0.0),
+                            .one => @as(f32, 1.0),
+                            .err => return errors.RuntimeError.DivisionByZero,
+                        };
+                    }
+                    return errors.RuntimeError.DivisionByZero; // ненулевое/0 — всегда ошибка
+                } else l / r,
                 '^' => std.math.pow(f32, l, r),
                 else => errors.RuntimeError.TypeMismatch,
             };
