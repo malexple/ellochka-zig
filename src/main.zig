@@ -1,12 +1,66 @@
 //! src/main.zig
 const std = @import("std");
+const builtin = @import("builtin");
 const state_mod = @import("state.zig");
 const program_mod = @import("program.zig");
 const statement_mod = @import("statement.zig");
 const errors = @import("errors.zig");
 const graphics = @import("graphics.zig");
 
+/// Включает интерпретацию ANSI/VT escape-последовательностей (\x1B[...)
+/// для стандартного вывода в консоли Windows.
+///
+/// Без этого в "родном" conhost.exe (обычный cmd.exe/PowerShell без
+/// Windows Terminal) операторы CLSC/CFON/CSIM/STRO/STLB будут печатать
+/// сырые байты escape-кодов как текст (например "[2J[H") вместо того,
+/// чтобы очищать экран/менять цвет. В IntelliJ IDEA, VS Code, Windows
+/// Terminal ANSI-коды интерпретируются самим эмулятором терминала,
+/// поэтому там проблема не проявляется без этого вызова.
+///
+/// Безопасно вызывать всегда: если вывод перенаправлен в файл/пайп
+/// (не консоль), GetConsoleMode просто вернёт ошибку, и функция
+/// тихо завершится без эффекта.
+fn enableAnsiEscapes() void {
+    if (builtin.os.tag != .windows) return;
+    const windows = std.os.windows;
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: windows.DWORD = 0x0004;
+
+    const handle = windows.kernel32.GetStdHandle(windows.STD_OUTPUT_HANDLE) orelse return;
+    if (handle == windows.INVALID_HANDLE_VALUE) return;
+
+    var mode: windows.DWORD = undefined;
+    if (windows.kernel32.GetConsoleMode(handle, &mode) == 0) return;
+
+    _ = windows.kernel32.SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+}
+
+/// Переключает кодовую страницу консоли Windows на UTF-8 (65001) —
+/// и для вывода, и для ввода.
+///
+/// Мы всегда пишем/читаем строки в UTF-8 (исходники .ell/.ela, LIST,
+/// VVOD и т.д.), но родной cmd.exe по умолчанию использует старую
+/// OEM-кодировку (обычно 866 для русской локали) — из-за этого
+/// кириллица превращается в "кракозябры", если пользователь не
+/// выполнил вручную "chcp 65001" перед запуском. Этот вызов делает
+/// то же самое программно при старте, один раз.
+///
+/// Безопасно вызывать всегда: на не-Windows и при отсутствии
+/// консоли (вывод в файл/пайп) вызовы просто ничего не меняют.
+fn enableUtf8Console() void {
+    if (builtin.os.tag != .windows) return;
+    const kernel32 = struct {
+        extern "kernel32" fn SetConsoleOutputCP(wCodePageID: c_uint) callconv(.winapi) c_int;
+        extern "kernel32" fn SetConsoleCP(wCodePageID: c_uint) callconv(.winapi) c_int;
+    };
+    const CP_UTF8: c_uint = 65001;
+    _ = kernel32.SetConsoleOutputCP(CP_UTF8);
+    _ = kernel32.SetConsoleCP(CP_UTF8);
+}
+
 pub fn main() !void {
+    enableAnsiEscapes();
+    enableUtf8Console();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -77,6 +131,15 @@ pub fn main() !void {
                 );
                 break;
             };
+
+            // Сбрасываем буфер вывода после КАЖДОЙ выполненной строки.
+            // Без этого текст от LIST/STRO/... оседает в 4КБ-буфере и не
+            // появляется на экране, если следующей командой идёт
+            // блокирующий KEYS/WAIT (или программа просто долго крутится
+            // в цикле без явного flush) — пользователь видит пустой экран,
+            // хотя программа уже давно что-то напечатала.
+            try stdout.flush();
+
             switch (result) {
                 .next => st.program_counter += 1,
                 .jump => |target| st.program_counter = target,

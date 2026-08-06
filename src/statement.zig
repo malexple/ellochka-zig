@@ -77,6 +77,8 @@ const VK_UP: u16 = 0x26;
 const VK_DOWN: u16 = 0x28;
 const VK_PRIOR: u16 = 0x21;
 const VK_NEXT: u16 = 0x22;
+const VK_LEFT: u16 = 0x25;
+const VK_RIGHT: u16 = 0x27;
 
 const KEY_EVENT_RECORD = extern struct {
     bKeyDown: i32,
@@ -214,8 +216,10 @@ fn peekKeyCode() ?f32 {
         const rec = records[0];
         if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
             const ascii = rec.Event.KeyEvent.uChar.AsciiChar;
-            return if (ascii != 0) @floatFromInt(ascii) else 256.0;
+            if (ascii != 0) return @floatFromInt(ascii);
+            return 256.0 + @as(f32, @floatFromInt(rec.Event.KeyEvent.wVirtualKeyCode));
         }
+        // не keydown-событие (например, отпускание клавиши) — читаем следующее
     }
 }
 
@@ -226,7 +230,7 @@ fn blockingReadKeyCode() f32 {
     const handle = GetStdHandle(STD_INPUT_HANDLE);
     var original_mode: u32 = 0;
     _ = GetConsoleMode(handle, &original_mode);
-    const raw_mode = original_mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+    const raw_mode = original_mode & ~ENABLE_LINE_INPUT & ~ENABLE_ECHO_INPUT;
     _ = SetConsoleMode(handle, raw_mode);
     defer _ = SetConsoleMode(handle, original_mode);
 
@@ -239,7 +243,8 @@ fn blockingReadKeyCode() f32 {
             const rec = records[0];
             if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
                 const ascii = rec.Event.KeyEvent.uChar.AsciiChar;
-                return if (ascii != 0) @floatFromInt(ascii) else 256.0;
+                if (ascii != 0) return @floatFromInt(ascii);
+                return 256.0 + @as(f32, @floatFromInt(rec.Event.KeyEvent.wVirtualKeyCode));
             }
             continue;
         }
