@@ -1,0 +1,35 @@
+CLSC
+LIST 'Тест стрелок в KEYS/WAIT'
+LIST 'Стрелки: LEFT=293 UP=294 RIGHT=295 DOWN=296, Esc=27 - выход'
+LIST ''
+
+@loop
+WAIT A
+LIST 'Код клавиши: '; A
+ESLI A == 293; @left
+ESLI A == 294; @up
+ESLI A == 295; @right
+ESLI A == 296; @down
+ESLI A == 27; @done
+LIST '  -> не распознано как стрелка'
+GOTO @loop
+
+@left
+LIST '  -> LEFT'
+GOTO @loop
+
+@up
+LIST '  -> UP'
+GOTO @loop
+
+@right
+LIST '  -> RIGHT'
+GOTO @loop
+
+@down
+LIST '  -> DOWN'
+GOTO @loop
+
+@done
+LIST 'Готово, выход'
+EXIT
