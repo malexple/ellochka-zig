@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
         .name = "ellochka",
         .root_module = exe_module,
     });
-
+    exe.root_module.strip = true;
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
