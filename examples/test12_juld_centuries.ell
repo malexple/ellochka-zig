@@ -1,0 +1,88 @@
+! ДИАГНОСТИКА JULD: вековые годы, 01.03.YYYY
+! FWD: дата -> J и diff относительно стандартного JDN-0.5
+! REV: целый стандартный JDN -> D,M,Y
+! --- 1900 ---
+D=1
+M=3
+Y=1900
+J=0
+JULD D;M;Y;J
+E=J-2415079.5
+LIST 'FWD 1900: J=';J;' diff=';E
+D=0
+M=0
+Y=0
+J=2415080
+JULD D;M;Y;J
+LIST 'REV 1900: D=';D;' M=';M;' Y=';Y
+! --- 2000 ---
+D=1
+M=3
+Y=2000
+J=0
+JULD D;M;Y;J
+E=J-2451604.5
+LIST 'FWD 2000: J=';J;' diff=';E
+D=0
+M=0
+Y=0
+J=2451605
+JULD D;M;Y;J
+LIST 'REV 2000: D=';D;' M=';M;' Y=';Y
+! --- 2100 ---
+D=1
+M=3
+Y=2100
+J=0
+JULD D;M;Y;J
+E=J-2488128.5
+LIST 'FWD 2100: J=';J;' diff=';E
+D=0
+M=0
+Y=0
+J=2488129
+JULD D;M;Y;J
+LIST 'REV 2100: D=';D;' M=';M;' Y=';Y
+! --- 2200 ---
+D=1
+M=3
+Y=2200
+J=0
+JULD D;M;Y;J
+E=J-2524652.5
+LIST 'FWD 2200: J=';J;' diff=';E
+D=0
+M=0
+Y=0
+J=2524653
+JULD D;M;Y;J
+LIST 'REV 2200: D=';D;' M=';M;' Y=';Y
+! --- 2300 ---
+D=1
+M=3
+Y=2300
+J=0
+JULD D;M;Y;J
+E=J-2561176.5
+LIST 'FWD 2300: J=';J;' diff=';E
+D=0
+M=0
+Y=0
+J=2561177
+JULD D;M;Y;J
+LIST 'REV 2300: D=';D;' M=';M;' Y=';Y
+! --- 2400 ---
+D=1
+M=3
+Y=2400
+J=0
+JULD D;M;Y;J
+E=J-2597701.5
+LIST 'FWD 2400: J=';J;' diff=';E
+D=0
+M=0
+Y=0
+J=2597702
+JULD D;M;Y;J
+LIST 'REV 2400: D=';D;' M=';M;' Y=';Y
+EXIT

@@ -1,0 +1,220 @@
+! ТЕСТ 11: JULD — границы календаря, строгая DOS-совместимость
+! Прямая ветка: дата -> JDN-0.5
+! 28.02.2000
+D=28
+M=2
+Y=2000
+J=0
+JULD D;M;Y;J
+ESLI J == 2451602.5; @f01
+LIST 'FAIL: 28.02.2000 -> J'
+GOTO @n01
+@f01
+LIST 'OK: 28.02.2000 -> 2451602.5'
+@n01
+! 29.02.2000 — високосный день столетнего года
+D=29
+M=2
+Y=2000
+J=0
+JULD D;M;Y;J
+ESLI J == 2451603.5; @f02
+LIST 'FAIL: 29.02.2000 -> J'
+GOTO @n02
+@f02
+LIST 'OK: 29.02.2000 -> 2451603.5'
+@n02
+! 01.03.2000
+D=1
+M=3
+Y=2000
+J=0
+JULD D;M;Y;J
+ESLI J == 2451604.5; @f03
+LIST 'FAIL: 01.03.2000 -> J'
+GOTO @n03
+@f03
+LIST 'OK: 01.03.2000 -> 2451604.5'
+@n03
+! 28.02.2100 — 2100 не високосный
+D=28
+M=2
+Y=2100
+J=0
+JULD D;M;Y;J
+ESLI J == 2488127.5; @f04
+LIST 'FAIL: 28.02.2100 -> J'
+GOTO @n04
+@f04
+LIST 'OK: 28.02.2100 -> 2488127.5'
+@n04
+! 01.03.2100
+D=1
+M=3
+Y=2100
+J=0
+JULD D;M;Y;J
+ESLI J == 2488128.5; @f05
+LIST 'FAIL: 01.03.2100 -> J'
+GOTO @n05
+@f05
+LIST 'OK: 01.03.2100 -> 2488128.5'
+@n05
+! Переход 1999 -> 2000
+D=31
+M=12
+Y=1999
+J=0
+JULD D;M;Y;J
+ESLI J == 2451543.5; @f06
+LIST 'FAIL: 31.12.1999 -> J'
+GOTO @n06
+@f06
+LIST 'OK: 31.12.1999 -> 2451543.5'
+@n06
+D=1
+M=1
+Y=2000
+J=0
+JULD D;M;Y;J
+ESLI J == 2451544.5; @f07
+LIST 'FAIL: 01.01.2000 -> J'
+GOTO @n07
+@f07
+LIST 'OK: 01.01.2000 -> 2451544.5'
+@n07
+! Переход 2000 -> 2001, 2000 — високосный
+D=31
+M=12
+Y=2000
+J=0
+JULD D;M;Y;J
+ESLI J == 2451909.5; @f08
+LIST 'FAIL: 31.12.2000 -> J'
+GOTO @n08
+@f08
+LIST 'OK: 31.12.2000 -> 2451909.5'
+@n08
+D=1
+M=1
+Y=2001
+J=0
+JULD D;M;Y;J
+ESLI J == 2451910.5; @f09
+LIST 'FAIL: 01.01.2001 -> J'
+GOTO @n09
+@f09
+LIST 'OK: 01.01.2001 -> 2451910.5'
+@n09
+! Круговое преобразование: 29.02.2000
+D=29
+M=2
+Y=2000
+J=0
+JULD D;M;Y;J
+D=0
+M=0
+Y=0
+JULD D;M;Y;J
+ESLI D == 29; @r01
+LIST 'FAIL: round-trip 29.02.2000 (D)'
+GOTO @rn01
+@r01
+ESLI M == 2; @r02
+LIST 'FAIL: round-trip 29.02.2000 (M)'
+GOTO @rn01
+@r02
+ESLI Y == 2000; @r03
+LIST 'FAIL: round-trip 29.02.2000 (Y)'
+GOTO @rn01
+@r03
+LIST 'OK: round-trip 29.02.2000'
+@rn01
+! Круговое преобразование: 01.03.2100
+D=1
+M=3
+Y=2100
+J=0
+JULD D;M;Y;J
+D=0
+M=0
+Y=0
+JULD D;M;Y;J
+ESLI D == 1; @r04
+LIST 'FAIL: round-trip 01.03.2100 (D)'
+GOTO @rn02
+@r04
+ESLI M == 3; @r05
+LIST 'FAIL: round-trip 01.03.2100 (M)'
+GOTO @rn02
+@r05
+ESLI Y == 2100; @r06
+LIST 'FAIL: round-trip 01.03.2100 (Y)'
+GOTO @rn02
+@r06
+LIST 'OK: round-trip 01.03.2100'
+@rn02
+! Круговое преобразование: граница високосного года
+D=31
+M=12
+Y=2000
+J=0
+JULD D;M;Y;J
+D=0
+M=0
+Y=0
+JULD D;M;Y;J
+ESLI D == 31; @r07
+LIST 'FAIL: round-trip 31.12.2000 (D)'
+GOTO @rn03
+@r07
+ESLI M == 12; @r08
+LIST 'FAIL: round-trip 31.12.2000 (M)'
+GOTO @rn03
+@r08
+ESLI Y == 2000; @r09
+LIST 'FAIL: round-trip 31.12.2000 (Y)'
+GOTO @rn03
+@r09
+LIST 'OK: round-trip 31.12.2000'
+@rn03
+! Целый JDN: DOS добавляет 0.5 к дню
+D=0
+M=0
+Y=0
+J=2451604
+JULD D;M;Y;J
+ESLI D == 29.5; @i01
+LIST 'FAIL: J=2451604 -> D=29.5'
+GOTO @in01
+@i01
+ESLI M == 2; @i02
+LIST 'FAIL: J=2451604 -> M=2'
+GOTO @in01
+@i02
+ESLI Y == 2000; @i03
+LIST 'FAIL: J=2451604 -> Y=2000'
+GOTO @in01
+@i03
+LIST 'OK: J=2451604 -> 29.5.02.2000'
+@in01
+D=0
+M=0
+Y=0
+J=2488129
+JULD D;M;Y;J
+ESLI D == 1.5; @i04
+LIST 'FAIL: J=2488129 -> D=1.5'
+GOTO @in02
+@i04
+ESLI M == 3; @i05
+LIST 'FAIL: J=2488129 -> M=3'
+GOTO @in02
+@i05
+ESLI Y == 2100; @i06
+LIST 'FAIL: J=2488129 -> Y=2100'
+GOTO @in02
+@i06
+LIST 'OK: J=2488129 -> 01.5.03.2100'
+@in02
+EXIT

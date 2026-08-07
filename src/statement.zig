@@ -2628,8 +2628,37 @@ fn execReak(
     return .next;
 }
 
-/// JULD D;M;Y;J — совместимость с исходным DOS-вариантом.
-/// DOS: дата -> JDN-0.5; целый JDN -> D+0.5.
+fn dosJuldLeapYear(year: i32) bool {
+    // Базовый 1900 год в DOS-модели не получает 29 февраля.
+    // После него DOS считает високосным любой год, кратный 4.
+    return year != 1900 and @mod(year, 4) == 0;
+}
+
+fn dosJuldDaysInMonth(month: i32, year: i32) i32 {
+    return switch (month) {
+        1 => 31,
+        2 => if (dosJuldLeapYear(year)) 29 else 28,
+        3 => 31,
+        4 => 30,
+        5 => 31,
+        6 => 30,
+        7 => 31,
+        8 => 31,
+        9 => 30,
+        10 => 31,
+        11 => 30,
+        12 => 31,
+        else => 0,
+    };
+}
+
+/// JULD D;M;Y;J — преобразование даты и номера дня.
+///
+/// Строгая совместимость с DOS:
+/// - начиная с 01.03.1900 используется DOS-календарь;
+/// - DOS считает все годы после 1900, кратные 4, високосными;
+/// - дата -> J сохраняет JDN - 0.5;
+/// - целый J -> D + 0.5.
 fn execJuld(
     args: []lexer.Token,
     st: *InterpreterState,
@@ -2642,49 +2671,120 @@ fn execJuld(
 
     const j_val = st.scalars[j_letter];
 
+    // Начало DOS-календаря: 01.03.1900.
+    // Его стандартный JDN равен 2415080.
+    const dos_base_jdn: i32 = 2415080;
+
     if (@abs(j_val) < 1e-6) {
         const d: i32 = @intFromFloat(st.scalars[d_letter]);
         const m: i32 = @intFromFloat(st.scalars[m_letter]);
         const y: i32 = @intFromFloat(st.scalars[y_letter]);
 
-        const a = @divTrunc(m - 14, 12);
-        const jdn = d - 32075 +
-            @divTrunc(1461 * (y + 4800 + a), 4) +
-            @divTrunc(367 * (m - 2 - 12 * a), 12) -
-            @divTrunc(3 * @divTrunc(y + 4900 + a, 100), 4);
+        const use_dos_calendar = y > 1900 or (y == 1900 and m >= 3);
 
-        // Историческая семантика DOS JULD.
-        st.scalars[j_letter] = @floatFromInt(jdn);
-        st.scalars[j_letter] -= 0.5;
+        if (use_dos_calendar) {
+            // Число дней от 01.03.1900 до заданной даты.
+            var days: i32 = 0;
+
+            var year: i32 = 1900;
+            while (year < y) : (year += 1) {
+                days += if (dosJuldLeapYear(year)) 366 else 365;
+            }
+
+            var month: i32 = 1;
+            while (month < m) : (month += 1) {
+                days += dosJuldDaysInMonth(month, y);
+            }
+
+            days += d - 1;
+
+            // В 1900 до 01.03 находятся 31 + 28 = 59 дней.
+            days -= 59;
+
+            const jdn = dos_base_jdn + days;
+
+            st.scalars[j_letter] = @floatFromInt(jdn);
+            st.scalars[j_letter] -= 0.5;
+        } else {
+            // Fallback для дат до 01.03.1900:
+            // прежняя григорианская формула.
+            const a = @divTrunc(m - 14, 12);
+            const jdn = d - 32075 +
+                @divTrunc(1461 * (y + 4800 + a), 4) +
+                @divTrunc(367 * (m - 2 - 12 * a), 12) -
+                @divTrunc(3 * @divTrunc(y + 4900 + a, 100), 4);
+
+            st.scalars[j_letter] = @floatFromInt(jdn);
+            st.scalars[j_letter] -= 0.5;
+        }
     } else {
-        // JDN-0.5 — результат прямой DOS-ветки.
-        // Для обратного расчёта он относится к следующему целому JDN.
+        // JDN-0.5 — нормальный результат прямой DOS-ветки.
+        // Для календарного расчёта его нужно вернуть к целому номеру дня.
         const is_dos_half = @abs((j_val - @floor(j_val)) - 0.5) < 1e-6;
         const j: i32 = @intFromFloat(
             if (is_dos_half) j_val + 0.5 else j_val,
         );
 
-        const l0 = j + 68569;
-        const n = @divTrunc(4 * l0, 146097);
-        const l1 = l0 - @divTrunc(146097 * n + 3, 4);
-        const y1 = @divTrunc(4000 * (l1 + 1), 1461001);
-        const l2 = l1 - @divTrunc(1461 * y1, 4) + 31;
-        const m1 = @divTrunc(80 * l2, 2447);
+        if (j >= dos_base_jdn) {
+            // Обратное преобразование в DOS-календаре.
+            //
+            // Прибавляем 59, так как отсчёт ведётся от 01.03.1900,
+            // но месяцы ниже перебираются от января.
+            var remaining: i32 = j - dos_base_jdn + 59;
+            var out_y: i32 = 1900;
 
-        const out_d = l2 - @divTrunc(2447 * m1, 80);
-        const l3 = @divTrunc(m1, 11);
-        const out_m = m1 + 2 - 12 * l3;
-        const out_y = 100 * (n - 49) + y1 + l3;
+            while (true) {
+                const year_days: i32 = if (dosJuldLeapYear(out_y)) 366 else 365;
+                if (remaining < year_days) break;
 
-        st.scalars[d_letter] = @floatFromInt(out_d);
+                remaining -= year_days;
+                out_y += 1;
+            }
 
-        // Именно этой части сейчас нет: DOS для целого JDN отдаёт D+0.5.
-        if (!is_dos_half) {
-            st.scalars[d_letter] += 0.5;
+            var out_m: i32 = 1;
+            while (true) {
+                const month_days = dosJuldDaysInMonth(out_m, out_y);
+                if (remaining < month_days) break;
+
+                remaining -= month_days;
+                out_m += 1;
+            }
+
+            const out_d = remaining + 1;
+
+            st.scalars[d_letter] = @floatFromInt(out_d);
+
+            // В DOS целый J возвращает дробный день D+0.5.
+            // Значение JDN-0.5, полученное прямой веткой, возвращает целый D.
+            if (!is_dos_half) {
+                st.scalars[d_letter] += 0.5;
+            }
+
+            st.scalars[m_letter] = @floatFromInt(out_m);
+            st.scalars[y_letter] = @floatFromInt(out_y);
+        } else {
+            // Fallback для JDN раньше 01.03.1900.
+            const l0 = j + 68569;
+            const n = @divTrunc(4 * l0, 146097);
+            const l1 = l0 - @divTrunc(146097 * n + 3, 4);
+            const y1 = @divTrunc(4000 * (l1 + 1), 1461001);
+            const l2 = l1 - @divTrunc(1461 * y1, 4) + 31;
+            const m1 = @divTrunc(80 * l2, 2447);
+
+            const out_d = l2 - @divTrunc(2447 * m1, 80);
+            const l3 = @divTrunc(m1, 11);
+            const out_m = m1 + 2 - 12 * l3;
+            const out_y = 100 * (n - 49) + y1 + l3;
+
+            st.scalars[d_letter] = @floatFromInt(out_d);
+
+            if (!is_dos_half) {
+                st.scalars[d_letter] += 0.5;
+            }
+
+            st.scalars[m_letter] = @floatFromInt(out_m);
+            st.scalars[y_letter] = @floatFromInt(out_y);
         }
-
-        st.scalars[m_letter] = @floatFromInt(out_m);
-        st.scalars[y_letter] = @floatFromInt(out_y);
     }
 
     return .next;
