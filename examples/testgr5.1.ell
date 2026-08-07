@@ -1,0 +1,16 @@
+GRAF
+CFON 1
+CSIM 15
+CLSC
+STRO 3
+STLB 3
+LIST 'ПЕЧАТНЫЙ ТЕКСТ: Москва'
+STRO 5
+STLB 3
+VVOD 'ВВОД: ';$0
+STRO 7
+STLB 3
+LIST 'СОХРАНЕНО: ';$0
+WAIT
+TEXT
+EXIT

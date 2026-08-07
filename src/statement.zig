@@ -1407,6 +1407,8 @@ fn execVvod(
     stdout: anytype,
     io: std.Io,
 ) errors.EllochkaError!ExecResult {
+    if (st.graphics_mode) return execGraphicsVvod(allocator, args, st);
+
     var effective_args = args;
     if (args.len > 0 and args[args.len - 1].kind == .backslash) {
         effective_args = args[0 .. args.len - 1];
@@ -1423,6 +1425,257 @@ fn execVvod(
             start = i + 1;
         }
         i += 1;
+    }
+    return .next;
+}
+fn isVvodScalarTarget(segment: []lexer.Token) bool {
+    return segment.len == 1 and
+        segment[0].kind == .identifier and
+        segment[0].text.len == 1 and
+        InterpreterState.letterIndex(segment[0].text[0]) != null;
+}
+
+fn isVvodStringTarget(segment: []lexer.Token) bool {
+    return segment.len == 2 and
+        segment[0].kind == .dollar and
+        dollarTargetChar(segment[1]) != null;
+}
+
+fn hasLaterVvodTarget(segments: []const []lexer.Token, index: usize) bool {
+    var i = index + 1;
+    while (i < segments.len) : (i += 1) {
+        if (isVvodScalarTarget(segments[i]) or isVvodStringTarget(segments[i])) return true;
+    }
+    return false;
+}
+
+fn eraseLastUtf8Codepoint(bytes: *std.ArrayListUnmanaged(u8)) void {
+    while (bytes.items.len > 0) {
+        const last = bytes.items[bytes.items.len - 1];
+        bytes.items.len -= 1;
+        if ((last & 0xC0) != 0x80) break;
+    }
+}
+
+/// Encodes one BMP WM_CHAR value. Surrogates are deliberately ignored: the
+/// graphics input contract accepts BMP characters, while an isolated UTF-16
+/// surrogate must never be inserted into a UTF-8 program string.
+fn appendBmpUtf8(
+    allocator: std.mem.Allocator,
+    bytes: *std.ArrayListUnmanaged(u8),
+    code: u16,
+) errors.EllochkaError!usize {
+    if (code >= 0xD800 and code <= 0xDFFF) return 0;
+
+    if (code < 0x80) {
+        bytes.append(allocator, @intCast(code)) catch return errors.RuntimeError.MemoryAllocationFailed;
+        return 1;
+    }
+    if (code < 0x800) {
+        bytes.append(allocator, @intCast(0xC0 | (code >> 6))) catch return errors.RuntimeError.MemoryAllocationFailed;
+        bytes.append(allocator, @intCast(0x80 | (code & 0x3F))) catch return errors.RuntimeError.MemoryAllocationFailed;
+        return 2;
+    }
+
+    bytes.append(allocator, @intCast(0xE0 | (code >> 12))) catch return errors.RuntimeError.MemoryAllocationFailed;
+    bytes.append(allocator, @intCast(0x80 | ((code >> 6) & 0x3F))) catch return errors.RuntimeError.MemoryAllocationFailed;
+    bytes.append(allocator, @intCast(0x80 | (code & 0x3F))) catch return errors.RuntimeError.MemoryAllocationFailed;
+    return 3;
+}
+
+/// Renders the complete editable tail and one inverted-cell caret in one
+/// DIB batch. The fixed background span also erases a deleted character or a
+/// previous caret without restoring pixels from a separate backup buffer.
+fn redrawGraphicsVvodLine(
+    st: *InterpreterState,
+    row: usize,
+    col: usize,
+    bytes: []const u8,
+    caret_visible: bool,
+) void {
+    if (row < 1 or row > graphics.TEXT_ROWS or col < 1 or col > graphics.TEXT_COLUMNS) return;
+
+    const available_cells = graphics.TEXT_COLUMNS + 1 - col;
+    const visible = utf8PrefixForCells(bytes, available_cells);
+    const used_cells = utf8CellCount(visible);
+    const foreground = st.palette[st.current_color_index];
+    const background = st.palette[st.current_background_color_index];
+
+    graphics.drawMenuRowUtf8(row, col, visible, available_cells, foreground, background);
+    if (caret_visible and used_cells < available_cells) {
+        graphics.drawInputCaret(row, col + used_cells, foreground);
+    }
+    graphics.present();
+}
+
+fn advanceGraphicsInputLine(st: *InterpreterState) void {
+    st.text_row += 1;
+    st.text_col = 1;
+    if (st.text_row > graphics.TEXT_ROWS) {
+        graphics.scrollTextRow(st.palette[st.current_background_color_index]);
+        st.text_row = graphics.TEXT_ROWS;
+    }
+}
+
+fn drawGraphicsVvodPrompt(
+    st: *InterpreterState,
+    bytes: []const u8,
+) void {
+    const logical_cells = utf8CellCount(bytes);
+    if (st.text_col <= graphics.TEXT_COLUMNS) {
+        const visible_cells = graphics.TEXT_COLUMNS + 1 - st.text_col;
+        const visible = utf8PrefixForCells(bytes, visible_cells);
+        graphics.drawTextUtf8(
+            st.text_row,
+            st.text_col,
+            visible,
+            st.palette[st.current_color_index],
+            st.palette[st.current_background_color_index],
+        );
+    }
+    st.text_col += logical_cells;
+}
+
+fn readGraphicsVvodValue(
+    allocator: std.mem.Allocator,
+    st: *InterpreterState,
+    max_bytes: usize,
+    numeric_target: ?u8,
+    string_target: ?u8,
+) errors.EllochkaError!void {
+    const input_row = st.text_row;
+    const input_col = st.text_col;
+    var buffer: std.ArrayListUnmanaged(u8) = .{};
+    defer buffer.deinit(allocator);
+
+    while (true) {
+        redrawGraphicsVvodLine(st, input_row, input_col, buffer.items, true);
+
+        var code: ?u16 = null;
+        while (code == null) {
+            if (graphics.pollKey()) |key| {
+                code = key;
+                break;
+            }
+            graphics.pumpMessages();
+            if (graphics.shouldForceExit()) {
+                // Window close has the same non-destructive semantics as Esc.
+                redrawGraphicsVvodLine(st, input_row, input_col, buffer.items, false);
+                return;
+            }
+            Sleep(10);
+        }
+
+        const key = code.?;
+        if (key == 27) {
+            // Esc cancels: erase editable text and caret, preserve old data,
+            // preserve the original text cursor position, and finish VVOD.
+            redrawGraphicsVvodLine(st, input_row, input_col, &[_]u8{}, false);
+            return;
+        }
+        if (key == 8) {
+            eraseLastUtf8Codepoint(&buffer);
+            continue;
+        }
+        if (key == 13) {
+            if (numeric_target) |letter| {
+                if (buffer.items.len > 0) {
+                    const value = std.fmt.parseFloat(f32, buffer.items) catch {
+                        graphics.inputBeep();
+                        continue;
+                    };
+                    st.scalars[letter] = value;
+                }
+                // Empty number input deliberately preserves the old scalar.
+            } else if (string_target) |ch| {
+                if (ch >= '0' and ch <= '9') {
+                    st.dynamic_strings[ch - '0'].set(st.allocator, buffer.items) catch return errors.RuntimeError.MemoryAllocationFailed;
+                } else {
+                    try st.setStaticString(ch, buffer.items);
+                }
+            }
+
+            redrawGraphicsVvodLine(st, input_row, input_col, buffer.items, false);
+            advanceGraphicsInputLine(st);
+            return;
+        }
+
+        // Служебные WM_KEYDOWN-коды имеют формат 256 + VK и в данном
+        // интерпретаторе находятся в диапазоне 256..511. Unicode WM_CHAR,
+        // включая кириллицу (например, М = 1052), должен быть принят.
+        if (key < 32 or (key >= 256 and key < 512)) continue;
+
+        const used_cells = utf8CellCount(buffer.items);
+        const max_input_cells = if (input_col < graphics.TEXT_COLUMNS)
+            graphics.TEXT_COLUMNS - input_col
+        else
+            0;
+        if (used_cells >= max_input_cells) {
+            graphics.inputBeep();
+            continue;
+        }
+
+        const byte_count: usize = if (key < 0x80) 1 else if (key < 0x800) 2 else 3;
+        if (buffer.items.len + byte_count > max_bytes) {
+            graphics.inputBeep();
+            continue;
+        }
+        _ = try appendBmpUtf8(allocator, &buffer, key);
+    }
+}
+
+fn execGraphicsVvod(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    var effective_args = args;
+    if (args.len > 0 and args[args.len - 1].kind == .backslash) {
+        effective_args = args[0 .. args.len - 1];
+    }
+
+    var segments = std.ArrayListUnmanaged([]lexer.Token){};
+    defer segments.deinit(allocator);
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= effective_args.len) : (i += 1) {
+        if (i == effective_args.len or effective_args[i].kind == .semicolon) {
+            const segment = effective_args[start..i];
+            if (segment.len > 0) {
+                segments.append(allocator, segment) catch return errors.RuntimeError.MemoryAllocationFailed;
+            }
+            start = i + 1;
+        }
+    }
+
+    for (segments.items, 0..) |segment, index| {
+        const literal_prompt = segment.len == 1 and segment[0].kind == .string_literal;
+        const dollar_prompt = isVvodStringTarget(segment) and hasLaterVvodTarget(segments.items, index);
+
+        if (literal_prompt or dollar_prompt) {
+            var prompt: std.ArrayListUnmanaged(u8) = .{};
+            defer prompt.deinit(allocator);
+            try appendListSegmentToBuffer(allocator, &prompt, segment, st);
+            drawGraphicsVvodPrompt(st, prompt.items);
+            continue;
+        }
+
+        if (isVvodScalarTarget(segment)) {
+            const letter = InterpreterState.letterIndex(segment[0].text[0]).?;
+            try readGraphicsVvodValue(allocator, st, graphics.TEXT_COLUMNS * 4, letter, null);
+            continue;
+        }
+        if (isVvodStringTarget(segment)) {
+            const ch = dollarTargetChar(segment[1]).?;
+            const max_bytes: usize = if (ch >= '0' and ch <= '9')
+                state_mod.MAX_DYNAMIC_STRING_LEN
+            else
+                state_mod.STATIC_STRING_LEN;
+            try readGraphicsVvodValue(allocator, st, max_bytes, null, ch);
+            continue;
+        }
+
+        return errors.ParseError.ExtensionNotImplemented;
     }
     return .next;
 }

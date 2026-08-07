@@ -71,7 +71,7 @@ pub const HEIGHT: i32 = 480;
 
 const WNDPROC = *const fn (HWND, u32, WPARAM, LPARAM) callconv(.winapi) LRESULT;
 
-const WNDCLASSEXA = extern struct {
+const WNDCLASSEXW = extern struct {
     cbSize: u32,
     style: u32,
     lpfnWndProc: WNDPROC,
@@ -81,8 +81,8 @@ const WNDCLASSEXA = extern struct {
     hIcon: HICON = null,
     hCursor: HCURSOR = null,
     hbrBackground: HBRUSH = null,
-    lpszMenuName: ?[*:0]const u8 = null,
-    lpszClassName: [*:0]const u8,
+    lpszMenuName: ?[*:0]const u16 = null,
+    lpszClassName: [*:0]const u16,
     hIconSm: HICON = null,
 };
 
@@ -129,9 +129,27 @@ const BITMAPFILEHEADER = packed struct {
     bfOffBits: u32,
 };
 
-extern "user32" fn RegisterClassExA(*const WNDCLASSEXA) callconv(.winapi) ATOM;
-extern "user32" fn CreateWindowExA(dwExStyle: u32, lpClassName: [*:0]const u8, lpWindowName: [*:0]const u8, dwStyle: u32, x: i32, y: i32, nWidth: i32, nHeight: i32, hWndParent: HWND, hMenu: ?*anyopaque, hInstance: HINSTANCE, lpParam: ?*anyopaque) callconv(.winapi) HWND;
-extern "user32" fn DefWindowProcA(HWND, u32, WPARAM, LPARAM) callconv(.winapi) LRESULT;
+extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(.winapi) ATOM;
+extern "user32" fn CreateWindowExW(
+    dwExStyle: u32,
+    lpClassName: [*:0]const u16,
+    lpWindowName: [*:0]const u16,
+    dwStyle: u32,
+    x: i32,
+    y: i32,
+    nWidth: i32,
+    nHeight: i32,
+    hWndParent: HWND,
+    hMenu: ?*anyopaque,
+    hInstance: HINSTANCE,
+    lpParam: ?*anyopaque,
+) callconv(.winapi) HWND;
+extern "user32" fn DefWindowProcW(
+    HWND,
+    u32,
+    WPARAM,
+    LPARAM,
+) callconv(.winapi) LRESULT;
 extern "user32" fn ShowWindow(HWND, i32) callconv(.winapi) BOOL;
 extern "user32" fn UpdateWindow(HWND) callconv(.winapi) BOOL;
 extern "user32" fn GetDC(HWND) callconv(.winapi) HDC;
@@ -143,6 +161,7 @@ extern "user32" fn DispatchMessageA(*const MSG) callconv(.winapi) LRESULT;
 extern "user32" fn AdjustWindowRect(*RECT, u32, BOOL) callconv(.winapi) BOOL;
 extern "user32" fn BeginPaint(HWND, *PAINTSTRUCT) callconv(.winapi) HDC;
 extern "user32" fn EndPaint(HWND, *const PAINTSTRUCT) callconv(.winapi) BOOL;
+extern "user32" fn MessageBeep(uType: u32) callconv(.winapi) BOOL;
 extern "kernel32" fn GetModuleHandleA(?[*:0]const u8) callconv(.winapi) HINSTANCE;
 
 extern "gdi32" fn CreateCompatibleDC(HDC) callconv(.winapi) HDC;
@@ -227,6 +246,13 @@ var g_key_count: usize = 0;
 
 const ROW_STRIDE: usize = @intCast(WIDTH * 3); // 640*3=1920, уже кратно 4
 const CONSOLAS_NAME = [_:0]u16{ 'C', 'o', 'n', 's', 'o', 'l', 'a', 's' };
+const WINDOW_CLASS_NAME: [12:0]u16 = .{
+    'E', 'l', 'l', 'o', 'c', 'h', 'k', 'a', 'G', 'r', 'a', 'f',
+};
+
+const WINDOW_TITLE: [8:0]u16 = .{
+    'E', 'l', 'l', 'o', 'c', 'h', 'k', 'a',
+};
 
 
 fn windowProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT {
@@ -270,7 +296,7 @@ fn windowProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) callconv(.wi
             return 0;
         },
         WM_DESTROY => return 0,
-        else => return DefWindowProcA(hwnd, msg, wparam, lparam),
+        else => return DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 
@@ -333,17 +359,17 @@ pub fn initGraphics() bool {
     }
 
     const hinstance = GetModuleHandleA(null);
-    const class_name: [*:0]const u8 = "EllochkaGraf";
+    const class_name: [*:0]const u16 = &WINDOW_CLASS_NAME;
 
     if (!g_class_registered) {
-        var wc: WNDCLASSEXA = .{
-            .cbSize = @sizeOf(WNDCLASSEXA),
+        var wc: WNDCLASSEXW = .{
+            .cbSize = @sizeOf(WNDCLASSEXW),
             .style = CS_OWNDC,
             .lpfnWndProc = windowProc,
             .hInstance = hinstance,
             .lpszClassName = class_name,
         };
-        if (RegisterClassExA(&wc) == 0) return false;
+        if (RegisterClassExW(&wc) == 0) return false;
         g_class_registered = true;
     }
 
@@ -353,10 +379,10 @@ pub fn initGraphics() bool {
     const win_w = rect.right - rect.left;
     const win_h = rect.bottom - rect.top;
 
-    const hwnd = CreateWindowExA(
+    const hwnd = CreateWindowExW(
         0,
         class_name,
-        "Ellochka",
+        &WINDOW_TITLE,
         style | WS_VISIBLE,
         100,
         100,
@@ -612,6 +638,17 @@ pub fn drawMenuRowUtf8(
 /// Publishes a batch of DIB changes in one BitBlt.
 pub fn present() void {
     blitToWindow();
+}
+
+/// Emits the standard Windows notification sound.
+pub fn inputBeep() void {
+    _ = MessageBeep(0);
+}
+
+/// Draws the VVOD caret as one inverted, opaque text cell. The caller batches
+/// this with drawMenuRowUtf8/clearTextRect and calls present afterwards.
+pub fn drawInputCaret(row: usize, col: usize, color: COLORREF) void {
+    clearTextRect(row, col, 1, 1, color);
 }
 
 /// Заменяет все уже нарисованные пиксели старого палитрового цвета.

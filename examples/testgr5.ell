@@ -1,0 +1,22 @@
+! TEST 17: GDI VVOD — prompt, Unicode, invalid number, Esc
+GRAF
+CFON 1
+CSIM 15
+CLSC
+A = 42
+B = 77
+$0 = 'Moscow'
+STRO 3
+STLB 3
+VVOD 'Age (old 42): ';A
+VVOD 'City (old Moscow): ';$0
+VVOD 'Cancel value (old 77), press Esc: ';B
+STRO 12
+STLB 3
+LIST 'Age =';A
+LIST 'City =';$0
+LIST 'B after Esc =';B
+LIST 'Press Enter to finish'
+WAIT
+TEXT
+EXIT
