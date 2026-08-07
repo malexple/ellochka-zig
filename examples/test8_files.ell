@@ -1,0 +1,25 @@
+! ТЕСТ 8: файловые операции TYPE LENF UDAL GETF PUTF
+UDAL 'out8.txt'
+TYPE 'out8.txt';'HELLO'\
+LENF 'out8.txt';L
+LIST 'LENF после TYPE\ ->';L;'  (ожидание 7)'
+
+TYPE 'out8.txt';'!'
+LENF 'out8.txt';L
+LIST 'LENF после TYPE ! ->';L;'  (ожидание 10)'
+
+UDAL 'out8.txt'
+LENF 'out8.txt';L
+LIST 'LENF после UDAL ->';L;'  (ожидание -1)'
+
+SIZE [1]=A
+A[1]=3.5
+UDAL 'out8f.bin'
+PUTF 'out8f.bin';1A;4;0;4
+SIZE [1]=B
+GETF 'out8f.bin';1B;4;0;4
+LIST 'PUTF/GETF D=4 ->';B[1];'  (ожидание 3.5)'
+UDAL 'out8f.bin'
+
+LIST '--- Конец теста 8 ---'
+EXIT

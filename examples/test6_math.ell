@@ -1,0 +1,47 @@
+! ТЕСТ 6: математические функции &
+GRDS
+B=&sin(90)
+LIST 'SIN(90)=';B;'  (ожидание 1)'
+B=&cos(0)
+LIST 'COS(0)=';B;'  (ожидание 1)'
+B=&tan(45)
+LIST 'TAN(45)=';B;'  (ожидание 1)'
+B=&asn(1)
+LIST 'ASN(1)=';B;'  (ожидание 90)'
+B=&acs(1)
+LIST 'ACS(1)=';B;'  (ожидание 0)'
+B=&atn(1)
+LIST 'ATN(1)=';B;'  (ожидание 45)'
+RADI
+B=&exp(0)
+LIST 'EXP(0)=';B;'  (ожидание 1)'
+B=&log(1)
+LIST 'LOG(1)=';B;'  (ожидание 0)'
+B=&int(5.8)
+LIST 'INT(5.8)=';B;'  (ожидание 5)'
+B=&int(-5.8)
+LIST 'INT(-5.8)=';B;'  (ожидание -5)'
+B=&frc(5.8)
+LIST 'FRC(5.8)=';B;'  (ожидание 0.8)'
+B=&frc(-5.8)
+LIST 'FRC(-5.8)=';B;'  (ожидание -0.8)'
+B=&abs(-7)
+LIST 'ABS(-7)=';B;'  (ожидание 7)'
+B=&sgn(-3)
+LIST 'SGN(-3)=';B;'  (ожидание -1)'
+B=&sgn(0)
+LIST 'SGN(0)=';B;'  (ожидание 0)'
+B=&sqr(16)
+LIST 'SQR(16)=';B;'  (ожидание 4)'
+B=&ran#
+ESLI B >> 0; @ranok1
+LIST 'RAN# FAIL: < 0'
+GOTO @ranend
+@ranok1
+ESLI B << 1; @ranok2
+LIST 'RAN# FAIL: >= 1'
+GOTO @ranend
+@ranok2
+LIST 'RAN# OK: в диапазоне [0,1)'
+@ranend
+EXIT

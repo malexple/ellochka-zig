@@ -49,11 +49,20 @@ fn resolveStringOperand(tokens: []lexer.Token, st: *InterpreterState) errors.Ell
 }
 
 fn formatScalar(buf: []u8, val: f32) []const u8 {
+    // Оригинал резервирует один печатный столбец под знак числа: у
+    // положительных (и нуля) там пробел, у отрицательных - сам минус.
+    // Без этого наш вывод визуально плотнее, но по значению не отличается.
     if (val == @trunc(val) and @abs(val) < 1.0e15) {
         const i: i64 = @intFromFloat(val);
-        return std.fmt.bufPrint(buf, "{d}", .{i}) catch "";
+        return if (i < 0)
+            std.fmt.bufPrint(buf, "{d}", .{i}) catch ""
+        else
+            std.fmt.bufPrint(buf, " {d}", .{i}) catch "";
     }
-    return std.fmt.bufPrint(buf, "{d}", .{val}) catch "";
+    return if (val < 0)
+        std.fmt.bufPrint(buf, "{d}", .{val}) catch ""
+    else
+        std.fmt.bufPrint(buf, " {d}", .{val}) catch "";
 }
 
 const SYSTEMTIME = extern struct {
@@ -1160,12 +1169,7 @@ fn execList(
     return .next;
 }
 
-fn printSegment(
-    allocator: std.mem.Allocator,
-    segment: []lexer.Token,
-    st: *InterpreterState,
-    stdout: anytype,
-) errors.EllochkaError!void {
+fn printSegment(allocator: std.mem.Allocator, segment: []lexer.Token, st: *InterpreterState, stdout: anytype) errors.EllochkaError!void {
     if (segment.len == 1 and segment[0].kind == .string_literal) {
         stdout.print("{s}", .{segment[0].text}) catch {};
         return;
@@ -1180,7 +1184,9 @@ fn printSegment(
     var parser = expr_mod.Parser.init(allocator, segment);
     const node = try parser.parseExpr();
     const val = try expr_mod.evaluate(node, st, .{});
-    stdout.print("{d}", .{val}) catch {};
+    var buf: [64]u8 = undefined;
+    const s = formatScalar(&buf, val);
+    stdout.print("{s}", .{s}) catch {};
 }
 
 fn execVvod(
@@ -1939,10 +1945,11 @@ fn execType(
             buf.append(allocator, '\n') catch return errors.RuntimeError.MemoryAllocationFailed;
         }
     } else {
+        // В отличие от LIST/VVOD, TYPE всегда заканчивает запись строки.
+        // Оригинальный DIKAR игнорирует завершающий '\' для файла:
+        // он не записывается в файл, но CRLF всё равно добавляется.
         var effective_rest = rest;
-        var suppress_newline = false;
         if (rest.len > 0 and rest[rest.len - 1].kind == .backslash) {
-            suppress_newline = true;
             effective_rest = rest[0 .. rest.len - 1];
         }
 
@@ -1958,9 +1965,9 @@ fn execType(
             }
             i += 1;
         }
-        if (!suppress_newline) {
-            buf.append(allocator, '\n') catch return errors.RuntimeError.MemoryAllocationFailed;
-        }
+
+        // TYPE в оригинале пишет DOS-перевод строки CRLF всегда.
+        buf.appendSlice(allocator, "\r\n") catch return errors.RuntimeError.MemoryAllocationFailed;
     }
 
     var file = std.Io.Dir.cwd().createFile(io, path_copy, .{ .truncate = false, .read = true }) catch return errors.RuntimeError.FileError;

@@ -1,0 +1,37 @@
+! ТЕСТ 7: INCR DECR MINA MAXA SUMA MEMC CURR UMEM
+A=5
+INCR A
+LIST 'INCR A ->';A;'  (ожидание 6)'
+DECR A
+DECR A
+LIST 'DECR A x2 ->';A;'  (ожидание 4)'
+
+SIZE [5]=D
+D[1]=30
+D[2]=10
+D[3]=50
+D[4]=20
+D[5]=40
+MINA D;I
+LIST 'MINA -> I=';I;'  (ожидание 2)'
+MAXA D;J
+LIST 'MAXA -> J=';J;'  (ожидание 3)'
+SUMA D;S
+LIST 'SUMA -> S=';S;'  (ожидание 150)'
+
+CURR 1K
+LIST 'CURR 1 -> K=';K;'  (ожидание 5)'
+
+MEMC 1D
+LIST 'MEMC 1D D[1]=';D[1];'  D[3]=';D[3];'  (0 0)'
+
+A=99
+MEMC
+LIST 'MEMC(-) A=';A;'  (ожидание 0)'
+
+UMEM 1
+CURR 1K
+LIST 'UMEM 1, CURR 1 -> K=';K;'  (ожидание 0)'
+
+LIST '--- Конец теста 7 ---'
+EXIT
