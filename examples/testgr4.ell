@@ -1,0 +1,48 @@
+! TEST 16: GDI MENU pages, L>30, inversion and right clipping
+GRAF
+CFON 1
+CSIM 15
+CLSC
+SIZE 35
+DATA 1;35;@data
+! PgDn: items 31..35. PgUp: items 01..30. Use arrows, then Enter.
+MENU 35;40;1;45;F
+TEXT
+LIST 'MENU selected item =';F
+EXIT
+@data
+01 - menu item with a long text
+02 - menu item with a long text
+03 - menu item with a long text
+04 - menu item with a long text
+05 - menu item with a long text
+06 - menu item with a long text
+07 - menu item with a long text
+08 - menu item with a long text
+09 - menu item with a long text
+10 - menu item with a long text
+11 - menu item with a long text
+12 - menu item with a long text
+13 - menu item with a long text
+14 - menu item with a long text
+15 - menu item with a long text
+16 - menu item with a long text
+17 - menu item with a long text
+18 - menu item with a long text
+19 - menu item with a long text
+20 - menu item with a long text
+21 - menu item with a long text
+22 - menu item with a long text
+23 - menu item with a long text
+24 - menu item with a long text
+25 - menu item with a long text
+26 - menu item with a long text
+27 - menu item with a long text
+28 - menu item with a long text
+29 - menu item with a long text
+30 - menu item with a long text
+31 - menu item with a long text
+32 - menu item with a long text
+33 - menu item with a long text
+34 - menu item with a long text
+35 - menu item with a long text

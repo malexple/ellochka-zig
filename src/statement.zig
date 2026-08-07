@@ -291,9 +291,23 @@ fn uppercaseWaitCode(code: f32) f32 {
     return @floatFromInt(value);
 }
 
-const MenuKey = struct { vk: u16, ascii: u8 };
+const MenuKey = struct { vk: u16, ascii: u16 };
 
-fn readMenuKey() MenuKey {
+fn readMenuKey(graphics_mode: bool) MenuKey {
+    if (graphics_mode) {
+        while (true) {
+            if (graphics.pollKey()) |code| {
+                if (code >= 256) {
+                    return .{ .vk = code - 256, .ascii = 0 };
+                }
+                return .{ .vk = 0, .ascii = code };
+            }
+            graphics.pumpMessages();
+            if (graphics.shouldForceExit()) return .{ .vk = 0, .ascii = 27 };
+            Sleep(10);
+        }
+    }
+
     if (builtin.os.tag != .windows) return .{ .vk = 0, .ascii = 0 };
     const handle = GetStdHandle(STD_INPUT_HANDLE);
     var original_mode: u32 = 0;
@@ -310,7 +324,10 @@ fn readMenuKey() MenuKey {
             _ = ReadConsoleInputA(handle, &records, 1, &read_count);
             const rec = records[0];
             if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
-                return .{ .vk = rec.Event.KeyEvent.wVirtualKeyCode, .ascii = rec.Event.KeyEvent.uChar.AsciiChar };
+                return .{
+                    .vk = rec.Event.KeyEvent.wVirtualKeyCode,
+                    .ascii = rec.Event.KeyEvent.uChar.AsciiChar,
+                };
             }
             continue;
         }
@@ -320,8 +337,13 @@ fn readMenuKey() MenuKey {
     }
 }
 
-fn drainPendingInput() void {
+fn drainPendingInput(graphics_mode: bool) void {
+    if (graphics_mode) {
+        graphics.clearKeys();
+        return;
+    }
     if (builtin.os.tag != .windows) return;
+
     const handle = GetStdHandle(STD_INPUT_HANDLE);
     var records: [16]INPUT_RECORD = undefined;
     while (true) {
@@ -616,6 +638,43 @@ fn execWait(
     return .next;
 }
 
+const MENU_WIDTH: usize = 40;
+
+fn redrawGraphicsMenu(
+    st: *InterpreterState,
+    n: usize,
+    l: usize,
+    s_row: usize,
+    c_col: usize,
+    selection: usize,
+) void {
+    const page_index = (selection - 1) / l;
+    const page_start = page_index * l + 1;
+    const page_end = @min(page_start + l - 1, n);
+    const foreground = st.palette[st.current_color_index];
+    const background = st.palette[st.current_background_color_index];
+
+    // This is local clearing only: no screen-wide implicit CLSC occurs.
+    graphics.clearTextRect(s_row, c_col, l, MENU_WIDTH, background);
+
+    var item = page_start;
+    while (item <= page_end) : (item += 1) {
+        const row = s_row + item - page_start;
+        const bytes = st.static_strings[item - 1][0..st.static_strings_lens[item - 1]];
+        const visible = utf8PrefixForCells(bytes, MENU_WIDTH);
+        const selected = item == selection;
+        graphics.drawMenuRowUtf8(
+            row,
+            c_col,
+            visible,
+            MENU_WIDTH,
+            if (selected) background else foreground,
+            if (selected) foreground else background,
+        );
+    }
+    graphics.present();
+}
+
 fn execMenu(
     allocator: std.mem.Allocator,
     args: []lexer.Token,
@@ -642,8 +701,15 @@ fn execMenu(
         st.scalars[f_letter] = -1.0;
         return .next;
     }
+
     const n: usize = @intFromFloat(nval);
-    const l: usize = @intFromFloat(lval);
+    const requested_l: usize = @intFromFloat(lval);
+    // GDI has exactly 30 physical text rows. The console backend preserves
+    // its historical, unbounded L semantics.
+    const l: usize = if (st.graphics_mode)
+        @min(requested_l, graphics.TEXT_ROWS)
+    else
+        requested_l;
     const s_row: usize = @intFromFloat(sval);
     const c_col: usize = @intFromFloat(cval);
 
@@ -656,35 +722,37 @@ fn execMenu(
     var selection: usize = st.last_menu_selection;
     if (selection < 1 or selection > n) selection = 1;
 
-    const menu_width: usize = 40;
-    var space_buf: [80]u8 = undefined;
+    var space_buf: [MENU_WIDTH]u8 = undefined;
     @memset(&space_buf, ' ');
-
-    drainPendingInput();
+    drainPendingInput(st.graphics_mode);
 
     var result: f32 = 0.0;
     while (true) {
-        const page_index = (selection - 1) / l;
-        const page_start = page_index * l + 1;
-        const page_end = @min(page_start + l - 1, n);
+        if (st.graphics_mode) {
+            redrawGraphicsMenu(st, n, l, s_row, c_col, selection);
+        } else {
+            const page_index = (selection - 1) / l;
+            const page_start = page_index * l + 1;
+            const page_end = @min(page_start + l - 1, n);
 
-        var row = s_row;
-        var item = page_start;
-        while (item <= page_end) : (item += 1) {
-            const bytes = st.static_strings[item - 1][0..st.static_strings_lens[item - 1]];
-            stdout.print("\x1B[{d};{d}H", .{ row, c_col }) catch {};
-            const is_selected = item == selection;
-            if (is_selected) stdout.print("\x1B[7m", .{}) catch {};
-            stdout.print("{s}", .{bytes}) catch {};
-            if (bytes.len < menu_width) {
-                stdout.print("{s}", .{space_buf[0 .. menu_width - bytes.len]}) catch {};
+            var row = s_row;
+            var item = page_start;
+            while (item <= page_end) : (item += 1) {
+                const bytes = st.static_strings[item - 1][0..st.static_strings_lens[item - 1]];
+                stdout.print("\x1B[{d};{d}H", .{ row, c_col }) catch {};
+                const is_selected = item == selection;
+                if (is_selected) stdout.print("\x1B[7m", .{}) catch {};
+                stdout.print("{s}", .{bytes}) catch {};
+                if (bytes.len < MENU_WIDTH) {
+                    stdout.print("{s}", .{space_buf[0 .. MENU_WIDTH - bytes.len]}) catch {};
+                }
+                if (is_selected) stdout.print("\x1B[0m", .{}) catch {};
+                row += 1;
             }
-            if (is_selected) stdout.print("\x1B[0m", .{}) catch {};
-            row += 1;
+            stdout.flush() catch {};
         }
-        stdout.flush() catch {};
 
-        const key = readMenuKey();
+        const key = readMenuKey(st.graphics_mode);
         if (key.ascii == 13) {
             result = @floatFromInt(selection);
             break;

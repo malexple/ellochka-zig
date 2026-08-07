@@ -538,6 +538,82 @@ pub fn drawTextUtf8(
     blitToWindow();
 }
 
+/// Clears a fixed text-cell rectangle in the DIB. Coordinates are 1-based.
+/// The Win32 clipping region safely discards any part outside 80x30.
+pub fn clearTextRect(
+    row: usize,
+    col: usize,
+    rows: usize,
+    cols: usize,
+    background: COLORREF,
+) void {
+    if (row < 1 or col < 1 or rows == 0 or cols == 0) return;
+
+    const x: i32 = @intCast((col - 1) * @as(usize, @intCast(TEXT_CELL_WIDTH)));
+    const y: i32 = @intCast((row - 1) * @as(usize, @intCast(TEXT_CELL_HEIGHT)));
+    const width: i32 = @intCast(cols * @as(usize, @intCast(TEXT_CELL_WIDTH)));
+    const height: i32 = @intCast(rows * @as(usize, @intCast(TEXT_CELL_HEIGHT)));
+    fillRect(x, y, width, height, background);
+}
+
+/// Draws one MENU row. Its opaque rectangle is always exactly `cells` cells
+/// wide, while UTF-8 input is clipped at a UTF-16 cell boundary. This keeps
+/// the menu geometry fixed at 40 columns and never splits a UTF-8 sequence.
+pub fn drawMenuRowUtf8(
+    row: usize,
+    col: usize,
+    utf8: []const u8,
+    cells: usize,
+    foreground: COLORREF,
+    background: COLORREF,
+) void {
+    if (row < 1 or col < 1 or cells == 0) return;
+    if (!ensureTextFont()) return;
+
+    const dc = g_mem_dc orelse return;
+    const wide_len_i32 = MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        utf8.ptr,
+        @intCast(utf8.len),
+        &g_text_utf16,
+        @intCast(g_text_utf16.len),
+    );
+    if (wide_len_i32 < 0) return;
+
+    const converted: usize = @intCast(wide_len_i32);
+    const visible_len = @min(converted, cells);
+    const x: i32 = @intCast((col - 1) * @as(usize, @intCast(TEXT_CELL_WIDTH)));
+    const y: i32 = @intCast((row - 1) * @as(usize, @intCast(TEXT_CELL_HEIGHT)));
+    const width: i32 = @intCast(cells * @as(usize, @intCast(TEXT_CELL_WIDTH)));
+    var rect = RECT{
+        .left = x,
+        .top = y,
+        .right = x + width,
+        .bottom = y + TEXT_CELL_HEIGHT,
+    };
+
+    const old_font = SelectObject(dc, g_text_font);
+    defer _ = SelectObject(dc, old_font);
+    _ = SetTextColor(dc, foreground);
+    _ = SetBkColor(dc, background);
+    _ = ExtTextOutW(
+        dc,
+        x,
+        y,
+        ETO_OPAQUE | ETO_CLIPPED,
+        &rect,
+        g_text_utf16[0..visible_len].ptr,
+        @intCast(visible_len),
+        null,
+    );
+}
+
+/// Publishes a batch of DIB changes in one BitBlt.
+pub fn present() void {
+    blitToWindow();
+}
+
 /// Заменяет все уже нарисованные пиксели старого палитрового цвета.
 /// Нужна для DOS-семантики CVET: изменение палитры меняет вид
 /// существующих пикселей, нарисованных этим цветом.
