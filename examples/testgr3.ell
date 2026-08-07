@@ -1,0 +1,64 @@
+! ТЕСТ 15: GDI-клавиатура — WAIT, KEYS, Unicode, WAIT #
+GRAF
+CFON 1
+CLSC
+CSIM 15
+STRO 2
+STLB 2
+LIST 'TEST 1: нажмите Enter'
+WAIT K
+ESLI K == 13; @a
+LIST 'FAIL: Enter, code=';K
+GOTO @b
+@a
+LIST 'OK: WAIT Enter = 13'
+@b
+STRO 6
+STLB 2
+LIST 'TEST 2: нажмите стрелку ВВЕРХ'
+WAIT K
+ESLI K == 294; @c
+LIST 'FAIL: Up, code=';K
+GOTO @d
+@c
+LIST 'OK: WAIT Up = 294'
+@d
+STRO 10
+STLB 2
+LIST 'TEST 3: нажмите стрелку ВПРАВО'
+@e
+KEYS K
+ESLI K == 0; @f
+ESLI K == 295; @g
+LIST 'FAIL: Right, code=';K
+GOTO @h
+@f
+SLEP 10
+GOTO @e
+@g
+LIST 'OK: KEYS Right = 295'
+@h
+STRO 14
+STLB 2
+LIST 'TEST 4: русская раскладка, нажмите строчную д'
+WAIT K#
+ESLI K == 1044; @i
+LIST 'FAIL: WAIT # д -> Д, code=';K
+GOTO @j
+@i
+LIST 'OK: WAIT # д -> Д = 1044'
+@j
+STRO 18
+STLB 2
+LIST 'TEST 5: нажмите Esc'
+WAIT K
+ESLI K == 27; @l
+LIST 'FAIL: Esc, code=';K
+GOTO @m
+@l
+LIST 'OK: WAIT Esc = 27'
+@m
+SLEP 1500
+TEXT
+LIST 'OK: test15 завершён, графический ввод выключен'
+EXIT

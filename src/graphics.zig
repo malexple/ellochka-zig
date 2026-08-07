@@ -38,6 +38,18 @@ pub const TEXT_CELL_HEIGHT: i32 = 16;
 const WM_CLOSE: u32 = 0x0010;
 const WM_PAINT: u32 = 0x000F;
 const WM_DESTROY: u32 = 0x0002;
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_CHAR: u32 = 0x0102;
+
+const VK_BACK: u16 = 0x08;
+const VK_RETURN: u16 = 0x0D;
+const VK_ESCAPE: u16 = 0x1B;
+const VK_PRIOR: u16 = 0x21;
+const VK_NEXT: u16 = 0x22;
+const VK_LEFT: u16 = 0x25;
+const VK_UP: u16 = 0x26;
+const VK_RIGHT: u16 = 0x27;
+const VK_DOWN: u16 = 0x28;
 const SW_HIDE: i32 = 0;
 const SW_SHOW: i32 = 5;
 const PM_REMOVE: u32 = 0x0001;
@@ -207,12 +219,42 @@ var g_text_utf16: [TEXT_COLUMNS * 4]u16 = undefined;
 var g_class_registered: bool = false;
 var g_force_exit: bool = false;
 
+const KEY_QUEUE_CAPACITY: usize = 64;
+var g_key_queue: [KEY_QUEUE_CAPACITY]u16 = undefined;
+var g_key_head: usize = 0;
+var g_key_tail: usize = 0;
+var g_key_count: usize = 0;
+
 const ROW_STRIDE: usize = @intCast(WIDTH * 3); // 640*3=1920, уже кратно 4
 const CONSOLAS_NAME = [_:0]u16{ 'C', 'o', 'n', 's', 'o', 'l', 'a', 's' };
 
 
 fn windowProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT {
     switch (msg) {
+        WM_KEYDOWN => {
+            const vk: u16 = @intCast(wparam & 0xffff);
+            switch (vk) {
+                VK_BACK,
+                VK_RETURN,
+                VK_ESCAPE,
+                VK_PRIOR,
+                VK_NEXT,
+                VK_LEFT,
+                VK_UP,
+                VK_RIGHT,
+                VK_DOWN,
+                => pushKey(if (vk == VK_BACK or vk == VK_RETURN or vk == VK_ESCAPE) vk else 256 + vk),
+                else => {},
+            }
+            return 0;
+        },
+        WM_CHAR => {
+            const code: u16 = @intCast(wparam & 0xffff);
+            // Enter and Backspace are already queued by WM_KEYDOWN.
+        // Printable BMP Unicode characters arrive here once.
+        if (code >= 32) pushKey(code);
+            return 0;
+        },
         WM_CLOSE => {
             g_force_exit = true;
             _ = DestroyWindow(hwnd);
@@ -230,6 +272,33 @@ fn windowProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) callconv(.wi
         WM_DESTROY => return 0,
         else => return DefWindowProcA(hwnd, msg, wparam, lparam),
     }
+}
+
+
+fn pushKey(code: u16) void {
+    // Preserve earlier events. New events are dropped if the FIFO is full.
+    if (g_key_count == KEY_QUEUE_CAPACITY) return;
+
+    g_key_queue[g_key_tail] = code;
+    g_key_tail = (g_key_tail + 1) % KEY_QUEUE_CAPACITY;
+    g_key_count += 1;
+}
+
+/// Returns and consumes the oldest pending GDI key event.
+pub fn pollKey() ?u16 {
+    if (g_key_count == 0) return null;
+
+    const code = g_key_queue[g_key_head];
+    g_key_head = (g_key_head + 1) % KEY_QUEUE_CAPACITY;
+    g_key_count -= 1;
+    return code;
+}
+
+/// Clears all pending GDI input when changing UI modes.
+pub fn clearKeys() void {
+    g_key_head = 0;
+    g_key_tail = 0;
+    g_key_count = 0;
 }
 
 pub fn isInitialized() bool {

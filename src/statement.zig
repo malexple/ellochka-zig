@@ -234,7 +234,16 @@ fn peekKeyCode() ?f32 {
 
 extern "kernel32" fn Sleep(dwMilliseconds: u32) callconv(.winapi) void;
 
-fn blockingReadKeyCode() f32 {
+fn blockingReadKeyCode(graphics_mode: bool) f32 {
+    if (graphics_mode) {
+        while (true) {
+            if (graphics.pollKey()) |code| return @floatFromInt(code);
+            graphics.pumpMessages();
+            if (graphics.shouldForceExit()) return 27.0;
+            Sleep(10);
+        }
+    }
+
     if (builtin.os.tag != .windows) return 0.0;
     const handle = GetStdHandle(STD_INPUT_HANDLE);
     var original_mode: u32 = 0;
@@ -261,6 +270,25 @@ fn blockingReadKeyCode() f32 {
         if (graphics.shouldForceExit()) return 27.0;
         Sleep(10);
     }
+}
+
+
+/// Uppercases the character codes that Ellochka receives from WAIT K#.
+/// Covers ASCII and Russian Cyrillic without an external Unicode dependency.
+fn uppercaseWaitCode(code: f32) f32 {
+    var value: u32 = @intFromFloat(code);
+
+    if (value >= 'a' and value <= 'z') {
+        value -= 'a' - 'A';
+    } else if (value >= 0x0430 and value <= 0x044f) {
+        // а..я -> А..Я
+        value -= 0x20;
+    } else if (value == 0x0451) {
+        // ё -> Ё
+        value = 0x0401;
+    }
+
+    return @floatFromInt(value);
 }
 
 const MenuKey = struct { vk: u16, ascii: u8 };
@@ -413,6 +441,7 @@ pub fn execute(allocator: std.mem.Allocator, line: []const u8, st: *InterpreterS
     if (eq(name, "TEXT")) {
         // Keep the GDI resources and DIB alive. Subsequent graphics operators
         // may draw into the hidden framebuffer; a later GRAF shows it again.
+        graphics.clearKeys();
         st.graphics_mode = false;
         graphics.hideWindow();
         return .next;
@@ -553,7 +582,16 @@ fn execKeys(
     st: *InterpreterState,
 ) errors.EllochkaError!ExecResult {
     const letter = try singleLetterFromTokens(args);
-    st.scalars[letter] = peekKeyCode() orelse 0.0;
+    if (st.graphics_mode) {
+        graphics.pumpMessages();
+        if (graphics.pollKey()) |code| {
+            st.scalars[letter] = @floatFromInt(code);
+        } else {
+            st.scalars[letter] = 0.0;
+        }
+    } else {
+        st.scalars[letter] = peekKeyCode() orelse 0.0;
+    }
     return .next;
 }
 
@@ -568,13 +606,11 @@ fn execWait(
         if (args.len >= 2 and args[1].kind == .hash) uppercase = true;
     }
 
-    const code = blockingReadKeyCode();
+    const code = blockingReadKeyCode(st.graphics_mode);
 
     if (target_letter) |letter| {
         var final_code = code;
-        if (uppercase and code >= 97.0 and code <= 122.0) {
-            final_code = code - 32.0;
-        }
+        if (uppercase) final_code = uppercaseWaitCode(code);
         st.scalars[letter] = final_code;
     }
     return .next;
@@ -2309,6 +2345,7 @@ fn execGraf(st: *InterpreterState) errors.EllochkaError!ExecResult {
     if (!graphics.initGraphics()) return errors.RuntimeError.FileError;
 
     // initGraphics shows an existing hidden window without clearing its DIB.
+    graphics.clearKeys();
     st.graphics_mode = true;
     return .next;
 }
