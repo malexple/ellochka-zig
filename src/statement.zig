@@ -471,7 +471,13 @@ pub fn execute(allocator: std.mem.Allocator, line: []const u8, st: *InterpreterS
     }
 
     if (eq(name, "CLSC")) {
-        stdout.print("\x1B[2J\x1B[H", .{}) catch {};
+        if (st.graphics_mode) {
+            graphics.clearScreen(st.palette[st.current_background_color_index]);
+            st.text_row = 1;
+            st.text_col = 1;
+        } else {
+            stdout.print("\x1B[2J\x1B[H", .{}) catch {};
+        }
         return .next;
     }
     if (eq(name, "CFON") or eq(name, "CSIM") or eq(name, "STRO") or eq(name, "STLB")) {
@@ -1126,19 +1132,34 @@ fn execAnsiControl(
     var parser = expr_mod.Parser.init(allocator, args);
     const node = try parser.parseExpr();
     const val = try expr_mod.evaluate(node, st, .{});
-    const n: u32 = @intFromFloat(val);
+    const requested: i32 = @intFromFloat(val);
 
     if (eq(name, "CSIM")) {
-        st.current_color_index = @intCast(@min(n, 15));
-        const code: u32 = if (n < 8) 30 + n else 90 + (n - 8);
-        stdout.print("\x1B[{d}m", .{code}) catch {};
+        const index: u8 = @intCast(std.math.clamp(requested, 0, 15));
+        st.current_color_index = index;
+        if (!st.graphics_mode) {
+            const code: u32 = if (index < 8) 30 + index else 90 + index - 8;
+            stdout.print("\x1B[{d}m", .{code}) catch {};
+        }
     } else if (eq(name, "CFON")) {
-        const code: u32 = 40 + (n % 8);
-        stdout.print("\x1B[{d}m", .{code}) catch {};
+        const index: u8 = @intCast(std.math.clamp(requested, 0, 15));
+        st.current_background_color_index = index;
+        if (!st.graphics_mode) {
+            const code: u32 = 40 + index % 8;
+            stdout.print("\x1B[{d}m", .{code}) catch {};
+        }
     } else if (eq(name, "STRO")) {
-        stdout.print("\x1B[{d};1H", .{n}) catch {};
+        if (st.graphics_mode) {
+            st.text_row = @intCast(std.math.clamp(requested, 1, @as(i32, @intCast(graphics.TEXT_ROWS))));
+        } else {
+            stdout.print("\x1B[{d};1H", .{requested}) catch {};
+        }
     } else if (eq(name, "STLB")) {
-        stdout.print("\x1B[{d}G", .{n}) catch {};
+        if (st.graphics_mode) {
+            st.text_col = @intCast(std.math.clamp(requested, 1, @as(i32, @intCast(graphics.TEXT_COLUMNS))));
+        } else {
+            stdout.print("\x1B[{d}G", .{requested}) catch {};
+        }
     }
     return .next;
 }
@@ -1149,6 +1170,8 @@ fn execList(
     st: *InterpreterState,
     stdout: anytype,
 ) errors.EllochkaError!ExecResult {
+   if (st.graphics_mode) return execGraphicsList(allocator, args, st);
+
     var newline = true;
     var effective_args = args;
     if (args.len > 0 and args[args.len - 1].kind == .backslash) {
@@ -1169,6 +1192,87 @@ fn execList(
         i += 1;
     }
     if (newline) stdout.print("\n", .{}) catch {};
+    return .next;
+}
+
+fn utf8SequenceLength(first: u8) usize {
+    if ((first & 0x80) == 0) return 1;
+    if ((first & 0xE0) == 0xC0) return 2;
+    if ((first & 0xF0) == 0xE0) return 3;
+    if ((first & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+fn utf8CellCount(bytes: []const u8) usize {
+    var count: usize = 0;
+    var index: usize = 0;
+    while (index < bytes.len) {
+        const step = @min(utf8SequenceLength(bytes[index]), bytes.len - index);
+        index += step;
+        count += 1;
+    }
+    return count;
+}
+
+fn utf8PrefixForCells(bytes: []const u8, max_cells: usize) []const u8 {
+    var cells: usize = 0;
+    var index: usize = 0;
+    while (index < bytes.len and cells < max_cells) {
+        const step = @min(utf8SequenceLength(bytes[index]), bytes.len - index);
+        index += step;
+        cells += 1;
+    }
+    return bytes[0..index];
+}
+
+fn execGraphicsList(
+    allocator: std.mem.Allocator,
+    args: []lexer.Token,
+    st: *InterpreterState,
+) errors.EllochkaError!ExecResult {
+    var newline = true;
+    var effective_args = args;
+    if (args.len > 0 and args[args.len - 1].kind == .backslash) {
+        newline = false;
+        effective_args = args[0 .. args.len - 1];
+    }
+
+    var output: std.ArrayListUnmanaged(u8) = .{};
+    var start: usize = 0;
+    var index: usize = 0;
+    while (index <= effective_args.len) : (index += 1) {
+        if (index == effective_args.len or effective_args[index].kind == .semicolon) {
+            try appendListSegmentToBuffer(allocator, &output, effective_args[start..index], st);
+            start = index + 1;
+        }
+    }
+
+    const logical_cells = utf8CellCount(output.items);
+    if (st.text_col <= graphics.TEXT_COLUMNS) {
+        const visible_cells = graphics.TEXT_COLUMNS + 1 - st.text_col;
+        const visible = utf8PrefixForCells(output.items, visible_cells);
+        graphics.drawTextUtf8(
+            st.text_row,
+            st.text_col,
+            visible,
+            st.palette[st.current_color_index],
+            st.palette[st.current_background_color_index],
+        );
+    }
+
+    if (newline) {
+        st.text_row += 1;
+        st.text_col = 1;
+        if (st.text_row > graphics.TEXT_ROWS) {
+            graphics.scrollTextRow(st.palette[st.current_background_color_index]);
+            st.text_row = graphics.TEXT_ROWS;
+        }
+    } else {
+        // Keep the logical cursor beyond the right border. Subsequent LIST
+        // calls ending in '\\' remain clipped until STLB or a newline resets it.
+        st.text_col += logical_cells;
+    }
+
     return .next;
 }
 

@@ -1,0 +1,24 @@
+! ТЕСТ 14: текстовый слой GDI, CFON, LIST, клиппинг, прокрутка
+GRAF
+CFON 1
+CLSC
+CSIM 15
+STRO 1
+STLB 1
+LIST 'OK: GDI текст, фон CFON=1'
+STRO 3
+STLB 1
+LIST 'Русский текст: ЭЛЛОЧКА'
+STRO 5
+STLB 75
+LIST 'ABCDEF1234'\
+LIST 'Z'\
+SLEP 10000
+STRO 30
+STLB 1
+LIST 'ROW 30: перед прокруткой'
+LIST 'OK: прокрутка на строке 30'
+SLEP 10000
+TEXT
+LIST 'OK: TEXT вернул вывод в консоль'
+EXIT

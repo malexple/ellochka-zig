@@ -95,6 +95,13 @@ pub const InterpreterState = struct {
     palette: [16]u32 = DEFAULT_PALETTE,
     /// Текущий цвет (0-15), общий для текста (CSIM) и графики.
     current_color_index: u8 = 15,
+    // Current text background colour, selected by CFON.
+    current_background_color_index: u8 = 0,
+
+    // Text cursor for the 80 x 30 GDI text grid.
+    // text_col may become greater than 80 after LIST ending in '\\'.
+    text_row: u8 = 1,
+    text_col: usize = 1,
     /// Текущая точка для MOVE (в логических координатах Эллочки, до
     /// применения инверсии оси Y).
     graphics_cursor_x: f32 = 0.0,

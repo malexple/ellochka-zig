@@ -19,6 +19,21 @@ const LRESULT = isize;
 const COLORREF = u32;
 const BOOL = i32;
 const ATOM = u16;
+const ETO_OPAQUE: u32 = 0x0002;
+const ETO_CLIPPED: u32 = 0x0004;
+const FW_NORMAL: i32 = 400;
+const DEFAULT_CHARSET: u32 = 1;
+const OUT_DEFAULT_PRECIS: u32 = 0;
+const CLIP_DEFAULT_PRECIS: u32 = 0;
+const CLEARTYPE_QUALITY: u32 = 5;
+const FIXED_PITCH: u32 = 0x01;
+const FF_MODERN: u32 = 0x30;
+const CP_UTF8: u32 = 65001;
+
+pub const TEXT_COLUMNS: usize = 80;
+pub const TEXT_ROWS: usize = 30;
+pub const TEXT_CELL_WIDTH: i32 = 8;
+pub const TEXT_CELL_HEIGHT: i32 = 16;
 
 const WM_CLOSE: u32 = 0x0010;
 const WM_PAINT: u32 = 0x000F;
@@ -136,14 +151,65 @@ extern "gdi32" fn CreateSolidBrush(COLORREF) callconv(.winapi) HGDIOBJ;
 extern "gdi32" fn GetStockObject(i32) callconv(.winapi) HGDIOBJ;
 extern "gdi32" fn PatBlt(HDC, i32, i32, i32, i32, u32) callconv(.winapi) BOOL;
 
+extern "gdi32" fn CreateFontW(
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    [*:0]const u16,
+) callconv(.winapi) HGDIOBJ;
+
+extern "gdi32" fn SetTextColor(
+    HDC,
+    COLORREF,
+) callconv(.winapi) COLORREF;
+
+extern "gdi32" fn SetBkColor(
+    HDC,
+    COLORREF,
+) callconv(.winapi) COLORREF;
+
+extern "gdi32" fn ExtTextOutW(
+    HDC,
+    i32,
+    i32,
+    u32,
+    ?*const RECT,
+    [*]const u16,
+    u32,
+    ?*const i32,
+) callconv(.winapi) BOOL;
+
+extern "kernel32" fn MultiByteToWideChar(
+    u32,
+    u32,
+    [*]const u8,
+    i32,
+    [*]u16,
+    i32,
+) callconv(.winapi) i32;
+
 var g_hwnd: HWND = null;
 var g_mem_dc: HDC = null;
 var g_mem_bitmap: HBITMAP = null;
 var g_bits: ?[*]u8 = null;
+var g_text_font: HGDIOBJ = null;
+var g_text_utf16: [TEXT_COLUMNS * 4]u16 = undefined;
 var g_class_registered: bool = false;
 var g_force_exit: bool = false;
 
 const ROW_STRIDE: usize = @intCast(WIDTH * 3); // 640*3=1920, уже кратно 4
+const CONSOLAS_NAME = [_:0]u16{ 'C', 'o', 'n', 's', 'o', 'l', 'a', 's' };
+
 
 fn windowProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT {
     switch (msg) {
@@ -282,6 +348,125 @@ fn blitToWindow() void {
     const wdc = GetDC(h);
     defer _ = ReleaseDC(h, wdc);
     _ = BitBlt(wdc, 0, 0, WIDTH, HEIGHT, mdc, 0, 0, SRCCOPY);
+}
+
+fn fillRect(x: i32, y: i32, width: i32, height: i32, color: COLORREF) void {
+    const dc = g_mem_dc orelse return;
+
+    const brush = CreateSolidBrush(color);
+    defer _ = DeleteObject(brush);
+    const pen = CreatePen(PS_SOLID, 1, color);
+    defer _ = DeleteObject(pen);
+
+    const old_brush = SelectObject(dc, brush);
+    defer _ = SelectObject(dc, old_brush);
+    const old_pen = SelectObject(dc, pen);
+    defer _ = SelectObject(dc, old_pen);
+
+    _ = Rectangle(dc, x, y, x + width, y + height);
+}
+
+fn ensureTextFont() bool {
+    if (g_text_font != null) return true;
+
+    g_text_font = CreateFontW(
+        -TEXT_CELL_HEIGHT,
+        TEXT_CELL_WIDTH,
+        0,
+        0,
+        FW_NORMAL,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        FIXED_PITCH | FF_MODERN,
+        &CONSOLAS_NAME,
+    );
+
+    return g_text_font != null;
+}
+
+/// Clears the whole 640x480 DIB with the current graphic text background.
+pub fn clearScreen(background: COLORREF) void {
+    fillRect(0, 0, WIDTH, HEIGHT, background);
+    blitToWindow();
+}
+
+/// Scrolls the whole DIB upward by one 16-pixel text row and clears the
+/// newly exposed bottom row with the specified text background colour.
+pub fn scrollTextRow(background: COLORREF) void {
+    const dc = g_mem_dc orelse return;
+
+    _ = BitBlt(
+        dc,
+        0,
+        0,
+        WIDTH,
+        HEIGHT - TEXT_CELL_HEIGHT,
+        dc,
+        0,
+        TEXT_CELL_HEIGHT,
+        SRCCOPY,
+    );
+    fillRect(0, HEIGHT - TEXT_CELL_HEIGHT, WIDTH, TEXT_CELL_HEIGHT, background);
+    blitToWindow();
+}
+
+/// Draws UTF-8 text in one fixed 8x16-cell row. The caller passes only the
+/// visible prefix, so the text never crosses the right edge of the 80-column
+/// grid.
+pub fn drawTextUtf8(
+    row: u8,
+    col: usize,
+    utf8: []const u8,
+    foreground: COLORREF,
+    background: COLORREF,
+) void {
+    if (utf8.len == 0 or row < 1 or row > TEXT_ROWS or col < 1 or col > TEXT_COLUMNS) return;
+    if (!ensureTextFont()) return;
+
+    const dc = g_mem_dc orelse return;
+
+    const wide_len_i32 = MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        utf8.ptr,
+        @intCast(utf8.len),
+        &g_text_utf16,
+        @intCast(g_text_utf16.len),
+    );
+    if (wide_len_i32 <= 0) return;
+    const wide_len: usize = @intCast(wide_len_i32);
+
+    const x: i32 = @intCast((col - 1) * @as(usize, @intCast(TEXT_CELL_WIDTH)));
+    const y: i32 = @intCast((@as(usize, row) - 1) * @as(usize, @intCast(TEXT_CELL_HEIGHT)));
+    const width: i32 = @intCast(wide_len * @as(usize, @intCast(TEXT_CELL_WIDTH)));
+    var rect = RECT{
+        .left = x,
+        .top = y,
+        .right = x + width,
+        .bottom = y + TEXT_CELL_HEIGHT,
+    };
+
+    const old_font = SelectObject(dc, g_text_font);
+    defer _ = SelectObject(dc, old_font);
+    _ = SetTextColor(dc, foreground);
+    _ = SetBkColor(dc, background);
+
+    _ = ExtTextOutW(
+        dc,
+        x,
+        y,
+        ETO_OPAQUE | ETO_CLIPPED,
+        &rect,
+        g_text_utf16[0..wide_len].ptr,
+        @intCast(wide_len),
+        null,
+    );
+    blitToWindow();
 }
 
 /// Заменяет все уже нарисованные пиксели старого палитрового цвета.
