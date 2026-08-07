@@ -435,14 +435,189 @@ EXIT
 
 
 
+| Проверка                            | Результат |
+| :---------------------------------- | :-------- |
+| `GOTO 7` на физический номер строки | ✅         |
+| Относительный `GOTO +3\`            | ✅         |
+| Строковый `ESLI $0=='HELLO'`        | ✅         |
+| Строковый `ESLI $0|='WORLD'`        | ✅         |
+| Открытый диапазон: `5 ∈ }1,10{`     | ✅         |
+| Граница не входит: `1 ∉ }1,10{`     | ✅         |
 
-
+````ela
+! ТЕСТ 9: GOTO номера, относительный переход, ESLI строки/диапазоны
+! --- часть 1: GOTO на абсолютный номер строки ---
+GOTO 7
+LIST 'FAIL: GOTO 7 не сработал'
+LIST 'FAIL: GOTO 7 не сработал'
+LIST 'FAIL: GOTO 7 не сработал'
+LIST 'OK: GOTO 7 сработал'
+! --- часть 2: относительный GOTO ---
+GOTO +3\
+LIST 'FAIL: GOTO +3\ не сработал'
+LIST 'FAIL: GOTO +3\ не сработал'
+LIST 'OK: GOTO +3\ сработал'
+! --- часть 3: строковый ESLI ---
+$0='HELLO'
+ESLI $0=='HELLO' @stryes
+LIST 'FAIL: строковый ESLI =='
+GOTO @strend
+@stryes
+LIST 'OK: строковый ESLI =='
+@strend
+ESLI $0|='WORLD' @neyes
+LIST 'FAIL: строковый ESLI |='
+GOTO @neend
+@neyes
+LIST 'OK: строковый ESLI |='
+@neend
+! --- часть 4: исключающий диапазон }Y,Z{ ---
+A=5
+ESLI A == }1,10{ @openyes
+LIST 'FAIL: 5 в }1,10{'
+GOTO @openend
+@openyes
+LIST 'OK: 5 в }1,10{'
+@openend
+A=1
+ESLI A == }1,10{ @boundfail
+LIST 'OK: 1 не в }1,10{'
+GOTO @boundend
+@boundfail
+LIST 'FAIL: 1 в }1,10{'
+@boundend
+EXIT
+````
 
 
 
 **Блок 7 — календарь**
 
 - `JULD` — дата → юлианский день → обратно дата
+
+| Дата        | Результат DOS/Zig    |
+| :---------- | :------------------- |
+| 01.01.2000  | `2451544.5`          |
+| 29.02.2024  | `2460369.5`          |
+| 01.03.1900  | `2415079.5`          |
+| `J=2451545` | `D=1.5, M=1, Y=2000` |
+
+````ela
+! ТЕСТ 10: JULD - строгая совместимость с DOS
+! DOS: дата -> JDN-0.5; целый JDN -> D+0.5
+! --- 01.01.2000 ---
+D=1
+M=1
+Y=2000
+J=0
+JULD D;M;Y;J
+ESLI J == 2451544.5; @a
+LIST 'FAIL: 01.01.2000 -> 2451544.5'
+GOTO @d1
+@a
+LIST 'OK: 01.01.2000 -> 2451544.5'
+@d1
+D=0
+M=0
+Y=0
+JULD D;M;Y;J
+ESLI D == 1; @b
+LIST 'FAIL: round-trip 01.01.2000 (D)'
+GOTO @d2
+@b
+ESLI M == 1; @c
+LIST 'FAIL: round-trip 01.01.2000 (M)'
+GOTO @d2
+@c
+ESLI Y == 2000; @d
+LIST 'FAIL: round-trip 01.01.2000 (Y)'
+GOTO @d2
+@d
+LIST 'OK: round-trip 01.01.2000'
+@d2
+! --- 29.02.2024 ---
+D=29
+M=2
+Y=2024
+J=0
+JULD D;M;Y;J
+ESLI J == 2460369.5; @e
+LIST 'FAIL: 29.02.2024 -> 2460369.5'
+GOTO @d3
+@e
+LIST 'OK: 29.02.2024 -> 2460369.5'
+@d3
+D=0
+M=0
+Y=0
+JULD D;M;Y;J
+ESLI D == 29; @f
+LIST 'FAIL: round-trip 29.02.2024 (D)'
+GOTO @d4
+@f
+ESLI M == 2; @g
+LIST 'FAIL: round-trip 29.02.2024 (M)'
+GOTO @d4
+@g
+ESLI Y == 2024; @h
+LIST 'FAIL: round-trip 29.02.2024 (Y)'
+GOTO @d4
+@h
+LIST 'OK: round-trip 29.02.2024'
+@d4
+! --- 01.03.1900 ---
+D=1
+M=3
+Y=1900
+J=0
+JULD D;M;Y;J
+ESLI J == 2415079.5; @i
+LIST 'FAIL: 01.03.1900 -> 2415079.5'
+GOTO @d5
+@i
+LIST 'OK: 01.03.1900 -> 2415079.5'
+@d5
+D=0
+M=0
+Y=0
+JULD D;M;Y;J
+ESLI D == 1; @j
+LIST 'FAIL: round-trip 01.03.1900 (D)'
+GOTO @d6
+@j
+ESLI M == 3; @k
+LIST 'FAIL: round-trip 01.03.1900 (M)'
+GOTO @d6
+@k
+ESLI Y == 1900; @l
+LIST 'FAIL: round-trip 01.03.1900 (Y)'
+GOTO @d6
+@l
+LIST 'OK: round-trip 01.03.1900'
+@d6
+! --- целый стандартный JDN в DOS даёт D+0.5 ---
+D=0
+M=0
+Y=0
+J=2451545
+JULD D;M;Y;J
+LIST 'DEBUG: J=2451545 -> D=';D;' M=';M;' Y=';Y
+ESLI D == 1.5; @m
+LIST 'FAIL: J=2451545 -> D=1.5'
+GOTO @d7
+@m
+ESLI M == 1; @n
+LIST 'FAIL: J=2451545 -> M=1'
+GOTO @d7
+@n
+ESLI Y == 2000; @o
+LIST 'FAIL: J=2451545 -> Y=2000'
+GOTO @d7
+@o
+LIST 'OK: J=2451545 -> 01.5.2000'
+@d7
+EXIT
+````
 
 
 

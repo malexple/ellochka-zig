@@ -1,0 +1,42 @@
+! ТЕСТ 9: GOTO номера, относительный переход, ESLI строки/диапазоны
+! --- часть 1: GOTO на абсолютный номер строки ---
+GOTO 7
+LIST 'FAIL: GOTO 7 не сработал'
+LIST 'FAIL: GOTO 7 не сработал'
+LIST 'FAIL: GOTO 7 не сработал'
+LIST 'OK: GOTO 7 сработал'
+! --- часть 2: относительный GOTO ---
+GOTO +3\
+LIST 'FAIL: GOTO +3\ не сработал'
+LIST 'FAIL: GOTO +3\ не сработал'
+LIST 'OK: GOTO +3\ сработал'
+! --- часть 3: строковый ESLI ---
+$0='HELLO'
+ESLI $0=='HELLO' @stryes
+LIST 'FAIL: строковый ESLI =='
+GOTO @strend
+@stryes
+LIST 'OK: строковый ESLI =='
+@strend
+ESLI $0|='WORLD' @neyes
+LIST 'FAIL: строковый ESLI |='
+GOTO @neend
+@neyes
+LIST 'OK: строковый ESLI |='
+@neend
+! --- часть 4: исключающий диапазон }Y,Z{ ---
+A=5
+ESLI A == }1,10{ @openyes
+LIST 'FAIL: 5 в }1,10{'
+GOTO @openend
+@openyes
+LIST 'OK: 5 в }1,10{'
+@openend
+A=1
+ESLI A == }1,10{ @boundfail
+LIST 'OK: 1 не в }1,10{'
+GOTO @boundend
+@boundfail
+LIST 'FAIL: 1 в }1,10{'
+@boundend
+EXIT

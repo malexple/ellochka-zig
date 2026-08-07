@@ -2628,12 +2628,8 @@ fn execReak(
     return .next;
 }
 
-/// JULD D;M;Y;J - юлианская дата в обе стороны (алгоритм
-/// Флигеля-Ван Фландерна, 1968). Направление определяется входным
-/// значением J: J≈0 -> вычислить J из D,M,Y; J!=0 -> вычислить D,M,Y
-/// из J. Деления целочисленные с усечением к нулю (@divTrunc),
-/// иначе формула даёт неверный результат для дат до 14-го числа
-/// января/февраля.
+/// JULD D;M;Y;J — совместимость с исходным DOS-вариантом.
+/// DOS: дата -> JDN-0.5; целый JDN -> D+0.5.
 fn execJuld(
     args: []lexer.Token,
     st: *InterpreterState,
@@ -2657,9 +2653,16 @@ fn execJuld(
             @divTrunc(367 * (m - 2 - 12 * a), 12) -
             @divTrunc(3 * @divTrunc(y + 4900 + a, 100), 4);
 
+        // Историческая семантика DOS JULD.
         st.scalars[j_letter] = @floatFromInt(jdn);
+        st.scalars[j_letter] -= 0.5;
     } else {
-        const j: i32 = @intFromFloat(j_val);
+        // JDN-0.5 — результат прямой DOS-ветки.
+        // Для обратного расчёта он относится к следующему целому JDN.
+        const is_dos_half = @abs((j_val - @floor(j_val)) - 0.5) < 1e-6;
+        const j: i32 = @intFromFloat(
+            if (is_dos_half) j_val + 0.5 else j_val,
+        );
 
         const l0 = j + 68569;
         const n = @divTrunc(4 * l0, 146097);
@@ -2674,6 +2677,12 @@ fn execJuld(
         const out_y = 100 * (n - 49) + y1 + l3;
 
         st.scalars[d_letter] = @floatFromInt(out_d);
+
+        // Именно этой части сейчас нет: DOS для целого JDN отдаёт D+0.5.
+        if (!is_dos_half) {
+            st.scalars[d_letter] += 0.5;
+        }
+
         st.scalars[m_letter] = @floatFromInt(out_m);
         st.scalars[y_letter] = @floatFromInt(out_y);
     }
