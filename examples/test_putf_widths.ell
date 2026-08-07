@@ -1,0 +1,43 @@
+CLSC
+LIST 'Тест PUTF/GETF D=1/D=2'
+SIZE [5]=X
+SIZE [5]=Y
+
+X[1]=10
+X[2]=255
+X[3]=300
+X[4]=0
+X[5]=128
+
+PUTF 'test_d1.dat';1X;1;0;1
+GETF 'test_d1.dat';1Y;1;0;1
+
+LIST 'D=1 (байт, ждём насыщение 300->255):'
+I=1
+@loop1
+LIST 'Y['; I; ']='; Y[I]
+I=I+1
+ESLI I <= 5; @loop1
+
+SIZE [5]=X
+SIZE [5]=Y
+X[1]=1000
+X[2]=65535
+X[3]=70000
+X[4]=0
+X[5]=32768
+
+PUTF 'test_d2.dat';1X;2;0;2
+GETF 'test_d2.dat';1Y;2;0;2
+
+LIST 'D=2 (слово, ждём насыщение 70000->65535):'
+I=1
+@loop2
+LIST 'Y['; I; ']='; Y[I]
+I=I+1
+ESLI I <= 5; @loop2
+
+UDAL 'test_d1.dat'
+UDAL 'test_d2.dat'
+LIST 'Готово'
+EXIT

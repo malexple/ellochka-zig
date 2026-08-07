@@ -1970,6 +1970,56 @@ fn execType(
     return .next;
 }
 
+/// Записывает одно числовое значение по смещению pos с шириной d байт.
+/// d=1 -> u8 (0..255), d=2 -> u16 (0..65535), d=4 -> f32 (побитово, как раньше).
+fn writeValueAt(io: std.Io, file: std.Io.File, pos: usize, val: f32, d: usize) errors.EllochkaError!void {
+    switch (d) {
+        1 => {
+            const clamped = std.math.clamp(val, 0.0, 255.0);
+            const byte: u8 = @intFromFloat(clamped);
+            file.writePositionalAll(io, &[_]u8{byte}, pos) catch return errors.RuntimeError.FileError;
+        },
+        2 => {
+            const clamped = std.math.clamp(val, 0.0, 65535.0);
+            const word: u16 = @intFromFloat(clamped);
+            const bytes: [2]u8 = @bitCast(word);
+            file.writePositionalAll(io, bytes[0..], pos) catch return errors.RuntimeError.FileError;
+        },
+        4 => {
+            const bytes: [4]u8 = @bitCast(val);
+            file.writePositionalAll(io, bytes[0..], pos) catch return errors.RuntimeError.FileError;
+        },
+        else => return errors.ParseError.ExtensionNotImplemented,
+    }
+}
+
+/// Читает одно числовое значение по смещению pos с шириной d байт.
+/// Обратная операция к writeValueAt.
+fn readValueAt(io: std.Io, file: std.Io.File, pos: usize, d: usize) errors.EllochkaError!f32 {
+    switch (d) {
+        1 => {
+            var byte: [1]u8 = undefined;
+            const n = file.readPositionalAll(io, byte[0..], pos) catch return errors.RuntimeError.FileError;
+            if (n < 1) return errors.RuntimeError.FileError;
+            return @floatFromInt(byte[0]);
+        },
+        2 => {
+            var bytes: [2]u8 = undefined;
+            const n = file.readPositionalAll(io, bytes[0..], pos) catch return errors.RuntimeError.FileError;
+            if (n < 2) return errors.RuntimeError.FileError;
+            const word: u16 = @bitCast(bytes);
+            return @floatFromInt(word);
+        },
+        4 => {
+            var bytes: [4]u8 = undefined;
+            const n = file.readPositionalAll(io, bytes[0..], pos) catch return errors.RuntimeError.FileError;
+            if (n < 4) return errors.RuntimeError.FileError;
+            return @bitCast(bytes);
+        },
+        else => return errors.ParseError.ExtensionNotImplemented,
+    }
+}
+
 fn execPutfGetf(
     allocator: std.mem.Allocator,
     args: []lexer.Token,
@@ -1999,7 +2049,8 @@ fn execPutfGetf(
         const dnode = try dp.parseExpr();
         const dval = try expr_mod.evaluate(dnode, st, .{});
         const d: usize = @intFromFloat(dval);
-        if (d != 4) return errors.ParseError.ExtensionNotImplemented;
+        // было: if (d != 4) return errors.ParseError.ExtensionNotImplemented;
+        if (d != 1 and d != 2 and d != 4) return errors.ParseError.ExtensionNotImplemented;
 
         var bp = expr_mod.Parser.init(allocator, params[1]);
         const bnode = try bp.parseExpr();
@@ -2029,8 +2080,8 @@ fn execPutfGetf(
             var i: usize = 0;
             while (i < count) : (i += 1) {
                 const pos = i * l + b;
-                const bytes: [4]u8 = @bitCast(target[i]);
-                file.writePositionalAll(io, bytes[0..], pos) catch return errors.RuntimeError.FileError;
+                // было: const bytes: [4]u8 = @bitCast(target[i]); file.writePositionalAll(...)
+                try writeValueAt(io, file, pos, target[i], d);
             }
         } else {
             var file = std.Io.Dir.cwd().openFile(io, path_copy, .{}) catch return errors.RuntimeError.FileError;
@@ -2038,10 +2089,8 @@ fn execPutfGetf(
             var i: usize = 0;
             while (i < count) : (i += 1) {
                 const pos = i * l + b;
-                var bytes: [4]u8 = undefined;
-                const n = file.readPositionalAll(io, bytes[0..], pos) catch return errors.RuntimeError.FileError;
-                if (n < 4) return errors.RuntimeError.FileError;
-                target[i] = @bitCast(bytes);
+                // было: var bytes: [4]u8 = undefined; ... target[i] = @bitCast(bytes);
+                target[i] = try readValueAt(io, file, pos, d);
             }
         }
         return .next;
@@ -2056,7 +2105,8 @@ fn execPutfGetf(
         const dnode = try dp.parseExpr();
         const dval = try expr_mod.evaluate(dnode, st, .{});
         const d: usize = @intFromFloat(dval);
-        if (d != 4) return errors.ParseError.ExtensionNotImplemented;
+        // было: if (d != 4) return errors.ParseError.ExtensionNotImplemented;
+        if (d != 1 and d != 2 and d != 4) return errors.ParseError.ExtensionNotImplemented;
 
         var bp = expr_mod.Parser.init(allocator, params[1]);
         const bnode = try bp.parseExpr();
@@ -2066,20 +2116,18 @@ fn execPutfGetf(
         if (is_write) {
             var file = std.Io.Dir.cwd().createFile(io, path_copy, .{ .truncate = false, .read = true }) catch return errors.RuntimeError.FileError;
             defer file.close(io);
-            const bytes: [4]u8 = @bitCast(st.scalars[letter]);
-            file.writePositionalAll(io, bytes[0..], b) catch return errors.RuntimeError.FileError;
+            // было: const bytes: [4]u8 = @bitCast(st.scalars[letter]); file.writePositionalAll(...)
+            try writeValueAt(io, file, b, st.scalars[letter], d);
         } else {
             var file = std.Io.Dir.cwd().openFile(io, path_copy, .{}) catch return errors.RuntimeError.FileError;
             defer file.close(io);
-            var bytes: [4]u8 = undefined;
-            const n = file.readPositionalAll(io, bytes[0..], b) catch return errors.RuntimeError.FileError;
-            if (n < 4) return errors.RuntimeError.FileError;
-            st.scalars[letter] = @bitCast(bytes);
+            // было: var bytes: [4]u8 = undefined; ... st.scalars[letter] = @bitCast(bytes);
+            st.scalars[letter] = try readValueAt(io, file, b, d);
         }
         return .next;
     }
 
-    // Вариант со строкой: F;$P;R;B (без изменений, как было у вас)
+    // Вариант со строкой: F;$P;R;B — без изменений
     if (rest.len >= 3 and rest[0].kind == .dollar and rest[1].kind != .dollar and rest[2].kind == .semicolon) {
         const p_ch = dollarTargetChar(rest[1]) orelse return errors.ParseError.InvalidVariableName;
         const params = try splitBySemicolon(2, rest[3..]);
