@@ -1,0 +1,15 @@
+! ТЕСТ 13: сохранение framebuffer при GRAF -> TEXT -> GRAF
+GRAF
+CSIM 4
+RAMA 0;0;639;479
+PAIN 320;240;4
+SLEP 2000
+TEXT
+CSIM 15
+LIST 'OK: TEXT скрыл графическое окно'
+SLEP 2000
+GRAF
+SLEP 2000
+TEXT
+LIST 'OK: второй GRAF показал сохранённый красный framebuffer'
+EXIT

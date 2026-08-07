@@ -411,6 +411,9 @@ pub fn execute(allocator: std.mem.Allocator, line: []const u8, st: *InterpreterS
         return execGraf(st);
     }
     if (eq(name, "TEXT")) {
+        // Keep the GDI resources and DIB alive. Subsequent graphics operators
+        // may draw into the hidden framebuffer; a later GRAF shows it again.
+        st.graphics_mode = false;
         graphics.hideWindow();
         return .next;
     }
@@ -2196,8 +2199,13 @@ fn colorRefForIndex(st: *InterpreterState, idx_f: f32) u32 {
 }
 
 fn execGraf(st: *InterpreterState) errors.EllochkaError!ExecResult {
+    // Repeated GRAF in an active graphics mode is a no-op.
+    if (st.graphics_mode) return .next;
+
     if (!graphics.initGraphics()) return errors.RuntimeError.FileError;
-    _ = st;
+
+    // initGraphics shows an existing hidden window without clearing its DIB.
+    st.graphics_mode = true;
     return .next;
 }
 

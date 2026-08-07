@@ -189,8 +189,11 @@ pub fn pumpMessages() void {
 /// напрямую; остальные графические операторы требуют, чтобы это уже
 /// было сделано (проверяется через isInitialized()).
 pub fn initGraphics() bool {
-    if (g_hwnd != null) {
-        _ = ShowWindow(g_hwnd, SW_SHOW);
+    if (g_hwnd) |hwnd| {
+        _ = ShowWindow(hwnd, SW_SHOW);
+        // The DIB can have changed while the window was hidden by TEXT.
+        // Force WM_PAINT now so GRAF immediately displays that saved frame.
+        _ = UpdateWindow(hwnd);
         return true;
     }
 

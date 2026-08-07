@@ -100,6 +100,11 @@ pub const InterpreterState = struct {
     graphics_cursor_x: f32 = 0.0,
     graphics_cursor_y: f32 = 0.0,
 
+
+    // UI routing mode. The DIB may remain initialized while this is false:
+    // graphics operators continue to draw into the hidden framebuffer.
+    graphics_mode: bool = false,
+
     pub fn init(allocator: std.mem.Allocator) InterpreterState {
         return .{ .allocator = allocator };
     }
