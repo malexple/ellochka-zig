@@ -1,0 +1,20 @@
+! TEST 20A: Unicode code points in DLIN, MID, FIND, CHR and $X[I]
+$0 = 'Привет'
+DLIN $0;A
+$1 = %MID($0,2,3)
+FIND $0;'в';1;B
+FIND $0;1074;1;C
+D:$0[1]
+$2 = %CHR(1,1044)
+$0[2] = 1044
+E:$0[2]
+LIST 'SOURCE =';$0
+LIST 'DLIN =';A
+LIST 'MID(2,3) =';$1
+LIST 'FIND string в =';B
+LIST 'FIND code 1074 =';C
+LIST 'CODE of first char П =';D
+LIST 'CHR(1044) =';$2
+LIST 'AFTER replace =';$0
+LIST 'CODE of replacement Д =';E
+EXIT

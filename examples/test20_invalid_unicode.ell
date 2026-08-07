@@ -1,0 +1,4 @@
+! TEST 20B: a UTF-16 surrogate is not a valid Unicode code point
+$0 = %CHR(1,55296)
+LIST 'UNREACHABLE'
+EXIT

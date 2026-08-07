@@ -1,0 +1,9 @@
+! TEST 19A: 75 Unicode code points in one static string
+SIZE 1
+DATA 1;1;@data
+A = 1
+LIST 'OK: 75 Cyrillic code points accepted:'
+LIST $A
+EXIT
+@data
+абвгдеёжзийклмноабвгдеёжзийклмноабвгдеёжзийклмноабвгдеёжзийклмноабвгдеёжзий

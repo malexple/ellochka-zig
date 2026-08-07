@@ -1,0 +1,9 @@
+! TEST 19B: adding the 76th code point must fail atomically
+SIZE 1
+DATA 1;1;@data
+A = 1
+$A = $A + 'я'
+LIST 'UNREACHABLE'
+EXIT
+@data
+абвгдеёжзийклмноабвгдеёжзийклмноабвгдеёжзийклмноабвгдеёжзийклмноабвгдеёжзий

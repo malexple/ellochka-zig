@@ -8,7 +8,11 @@ const errors = @import("errors.zig");
 pub const NUM_LETTERS: usize = 26;
 pub const MAX_DYNAMIC_STRING_LEN: usize = 1024;
 pub const MAX_STATIC_STRINGS: usize = 850;
-pub const STATIC_STRING_LEN: usize = 75;
+/// Максимальное число Unicode code points в элементе строкового массива $$.
+pub const STATIC_STRING_CODEPOINT_LIMIT: usize = 75;
+
+/// Максимум UTF-8 байтов: каждый Unicode code point занимает до 4 байтов.
+pub const STATIC_STRING_LEN: usize = STATIC_STRING_CODEPOINT_LIMIT * 4;
 pub const MAX_PROGRAM_LINES: usize = 1000;
 
 pub const AngleMode = enum { radians, degrees };
@@ -75,8 +79,11 @@ pub const InterpreterState = struct {
     arrays2d: [NUM_LETTERS]Array2D = [_]Array2D{.{}} ** NUM_LETTERS,
     dynamic_strings: [10]DynamicString = [_]DynamicString{.{}} ** 10,
 
+    /// Каждый slot имеет 300 байт UTF-8, но логический предел — 75 code points.
     static_strings: [][STATIC_STRING_LEN]u8 = &[_][STATIC_STRING_LEN]u8{},
-    static_strings_lens: []u8 = &[_]u8{},
+
+    /// Реальная длина строки в UTF-8 байтах, максимум 300.
+    static_strings_lens: []u16 = &[_]u16{},
 
     array1d_len: usize = 0,
     array2d_rows: usize = 0,
@@ -132,6 +139,102 @@ pub const InterpreterState = struct {
         }
     }
 
+    pub const Utf8Char = struct {
+        start: usize,
+        end: usize,
+        codepoint: u21,
+    };
+
+    /// Считает Unicode code points. Невалидный UTF-8 недопустим во внутренней
+    /// строковой памяти интерпретатора.
+    pub fn unicodeCodepointCount(bytes: []const u8) errors.EllochkaError!usize {
+        return std.unicode.utf8CountCodepoints(bytes) catch
+            errors.RuntimeError.InvalidUnicodeCodePoint;
+    }
+
+    /// Возвращает байтовый диапазон и Unicode-код N-го символа UTF-8 строки.
+    /// Индексация Эллочки начинается с 1.
+    pub fn utf8CharAt(
+        bytes: []const u8,
+        char_index: usize,
+    ) errors.EllochkaError!Utf8Char {
+        if (char_index == 0) return errors.RuntimeError.IndexOutOfBounds;
+
+        const view = std.unicode.Utf8View.init(bytes) catch
+            return errors.RuntimeError.InvalidUnicodeCodePoint;
+        var iter = view.iterator();
+        var current: usize = 1;
+
+        while (iter.nextCodepointSlice()) |slice| {
+            if (current == char_index) {
+                const start = @intFromPtr(slice.ptr) - @intFromPtr(bytes.ptr);
+                const codepoint = std.unicode.utf8Decode(slice) catch
+                    return errors.RuntimeError.InvalidUnicodeCodePoint;
+
+                return .{
+                    .start = start,
+                    .end = start + slice.len,
+                    .codepoint = codepoint,
+                };
+            }
+            current += 1;
+        }
+
+        return errors.RuntimeError.IndexOutOfBounds;
+    }
+
+    /// Добавляет один допустимый Unicode code point в UTF-8 буфер.
+    pub fn appendUtf8Codepoint(
+        allocator: std.mem.Allocator,
+        out: *std.ArrayListUnmanaged(u8),
+        code: u32,
+    ) errors.EllochkaError!void {
+        if (code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF)) {
+            return errors.RuntimeError.InvalidUnicodeCodePoint;
+        }
+
+        const point: u21 = @intCast(code);
+        var encoded: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(point, &encoded) catch
+            return errors.RuntimeError.InvalidUnicodeCodePoint;
+
+        out.appendSlice(allocator, encoded[0..len]) catch
+            return errors.RuntimeError.MemoryAllocationFailed;
+    }
+
+    /// Атомарно заменяет один Unicode code point в `$0..$9` или `$A..$Z`.
+    /// При ошибке старая строка остаётся без изменений.
+    pub fn writeUnicodeCodepoint(
+        self: *InterpreterState,
+        ch: u8,
+        index1based: usize,
+        code: u32,
+    ) errors.EllochkaError!void {
+        const old_bytes = try self.resolveStringBytes(ch);
+        const target = try utf8CharAt(old_bytes, index1based);
+
+        var replacement: std.ArrayListUnmanaged(u8) = .{};
+        defer replacement.deinit(self.allocator);
+
+        replacement.appendSlice(self.allocator, old_bytes[0..target.start]) catch
+            return errors.RuntimeError.MemoryAllocationFailed;
+        try appendUtf8Codepoint(self.allocator, &replacement, code);
+        replacement.appendSlice(self.allocator, old_bytes[target.end..]) catch
+            return errors.RuntimeError.MemoryAllocationFailed;
+
+        if (ch >= '0' and ch <= '9') {
+            if (replacement.items.len > MAX_DYNAMIC_STRING_LEN) {
+                return errors.RuntimeError.StringTooLong;
+            }
+            self.dynamic_strings[ch - '0'].set(self.allocator, replacement.items) catch
+                return errors.RuntimeError.MemoryAllocationFailed;
+            return;
+        }
+
+        // setStaticString дополнительно проверит 75 code points и ёмкость.
+    try self.setStaticString(ch, replacement.items);
+    }
+
     pub fn sizeArray1D(self: *InterpreterState, letter_index: u8, new_len: usize) !void {
         var arr = &self.arrays1d[letter_index];
         if (arr.len > 0) self.allocator.free(arr.*);
@@ -157,7 +260,7 @@ pub const InterpreterState = struct {
             self.allocator.free(self.static_strings_lens);
         }
         self.static_strings = try self.allocator.alloc([STATIC_STRING_LEN]u8, new_len);
-        self.static_strings_lens = try self.allocator.alloc(u8, new_len);
+        self.static_strings_lens = try self.allocator.alloc(u16, new_len);
         for (self.static_strings) |*s| @memset(s, 0);
         @memset(self.static_strings_lens, 0);
     }
@@ -184,7 +287,7 @@ pub const InterpreterState = struct {
                     self.allocator.free(self.static_strings_lens);
                 }
                 self.static_strings = &[_][STATIC_STRING_LEN]u8{};
-                self.static_strings_lens = &[_]u8{};
+                self.static_strings_lens = &[_]u16{};
             },
             else => {},
         }
@@ -210,44 +313,69 @@ pub const InterpreterState = struct {
         return self.static_strings[slot][0..self.static_strings_lens[slot]];
     }
 
-    pub fn setStaticString(self: *InterpreterState, ch: u8, value: []const u8) errors.EllochkaError!void {
-        const letter = letterIndex(ch) orelse return errors.ParseError.InvalidVariableName;
-        if (self.static_strings.len == 0) return errors.RuntimeError.ArrayNotSized;
-        const scalar_val = self.scalars[letter];
-        if (std.math.isNan(scalar_val) or scalar_val < 1) return errors.RuntimeError.IndexOutOfBounds;
-        const index: usize = @intFromFloat(scalar_val);
-        if (index == 0 or index > self.static_strings.len) return errors.RuntimeError.IndexOutOfBounds;
-        if (value.len > STATIC_STRING_LEN) return errors.RuntimeError.StringTooLong;
+    pub fn setStaticString(
+        self: *InterpreterState,
+        ch: u8,
+        value: []const u8,
+    ) errors.EllochkaError!void {
+        const letter = letterIndex(ch) orelse
+            return errors.ParseError.InvalidVariableName;
+
+        if (self.static_strings.len == 0) {
+            return errors.RuntimeError.ArrayNotSized;
+        }
+
+        const scalar_value = self.scalars[letter];
+        if (std.math.isNan(scalar_value) or scalar_value < 1) {
+            return errors.RuntimeError.IndexOutOfBounds;
+        }
+
+        const index: usize = @intFromFloat(scalar_value);
+        if (index == 0 or index > self.static_strings.len) {
+            return errors.RuntimeError.IndexOutOfBounds;
+        }
+
+        const char_count = try unicodeCodepointCount(value);
+        if (char_count > STATIC_STRING_CODEPOINT_LIMIT or value.len > STATIC_STRING_LEN) {
+            return errors.RuntimeError.StringTooLong;
+        }
+
         const slot = index - 1;
         @memcpy(self.static_strings[slot][0..value.len], value);
         self.static_strings_lens[slot] = @intCast(value.len);
     }
 
-    pub fn setStaticStringByIndex(self: *InterpreterState, index_1based: usize, value: []const u8) errors.EllochkaError!void {
-        if (self.static_strings.len == 0) return errors.RuntimeError.ArrayNotSized;
-        if (index_1based == 0 or index_1based > self.static_strings.len) return errors.RuntimeError.IndexOutOfBounds;
-        if (value.len > STATIC_STRING_LEN) return errors.RuntimeError.StringTooLong;
-        const slot = index_1based - 1;
+    pub fn setStaticStringByIndex(
+        self: *InterpreterState,
+        index1based: usize,
+        value: []const u8,
+    ) errors.EllochkaError!void {
+        if (self.static_strings.len == 0) {
+            return errors.RuntimeError.ArrayNotSized;
+        }
+
+        if (index1based == 0 or index1based > self.static_strings.len) {
+            return errors.RuntimeError.IndexOutOfBounds;
+        }
+
+        const char_count = try unicodeCodepointCount(value);
+        if (char_count > STATIC_STRING_CODEPOINT_LIMIT or value.len > STATIC_STRING_LEN) {
+            return errors.RuntimeError.StringTooLong;
+        }
+
+        const slot = index1based - 1;
         @memcpy(self.static_strings[slot][0..value.len], value);
         self.static_strings_lens[slot] = @intCast(value.len);
     }
 
-    pub fn writeCharCode(self: *InterpreterState, ch: u8, index_1based: usize, value: u8) errors.EllochkaError!void {
-        if (ch >= '0' and ch <= '9') {
-            const buf = self.dynamic_strings[ch - '0'].data;
-            if (index_1based == 0 or index_1based > buf.len) return errors.RuntimeError.IndexOutOfBounds;
-            buf[index_1based - 1] = value;
-            return;
-        }
-        const letter = letterIndex(ch) orelse return errors.ParseError.InvalidVariableName;
-        if (self.static_strings.len == 0) return errors.RuntimeError.ArrayNotSized;
-        const scalar_val = self.scalars[letter];
-        if (std.math.isNan(scalar_val) or scalar_val < 1) return errors.RuntimeError.IndexOutOfBounds;
-        const sidx: usize = @intFromFloat(scalar_val);
-        if (sidx == 0 or sidx > self.static_strings.len) return errors.RuntimeError.IndexOutOfBounds;
-        const slot = sidx - 1;
-        const len = self.static_strings_lens[slot];
-        if (index_1based == 0 or index_1based > len) return errors.RuntimeError.IndexOutOfBounds;
-        self.static_strings[slot][index_1based - 1] = value;
+    /// Историческое имя сохранено для совместимости внутренних вызовов.
+    /// Теперь индекс и значение имеют Unicode-семантику.
+    pub fn writeCharCode(
+        self: *InterpreterState,
+        ch: u8,
+        index1based: usize,
+        value: u8,
+    ) errors.EllochkaError!void {
+        try self.writeUnicodeCodepoint(ch, index1based, value);
     }
 };

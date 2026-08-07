@@ -65,6 +65,40 @@ fn formatScalar(buf: []u8, val: f32) []const u8 {
         std.fmt.bufPrint(buf, " {d}", .{val}) catch "";
 }
 
+fn unicodeCodepointFromFloat(value: f32) errors.EllochkaError!u32 {
+    if (std.math.isNan(value) or value < 0.0 or value > 1114111.0) {
+        return errors.RuntimeError.InvalidUnicodeCodePoint;
+    }
+    const code: u32 = @intFromFloat(value);
+    if (code >= 0xD800 and code <= 0xDFFF) {
+        return errors.RuntimeError.InvalidUnicodeCodePoint;
+    }
+    return code;
+}
+
+/// Converts a 1-based Unicode character position to a byte offset.
+/// Position `char_count + 1` is the legal offset immediately after a string.
+fn unicodeByteOffset(
+    bytes: []const u8,
+    char_position: usize,
+) errors.EllochkaError!usize {
+    if (char_position == 0) return errors.RuntimeError.IndexOutOfBounds;
+
+    const count = try InterpreterState.unicodeCodepointCount(bytes);
+    if (char_position > count + 1) return errors.RuntimeError.IndexOutOfBounds;
+    if (char_position == count + 1) return bytes.len;
+
+    return (try InterpreterState.utf8CharAt(bytes, char_position)).start;
+}
+
+fn appendUnicodeCodepoint(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    code: u32,
+) errors.EllochkaError!void {
+    try InterpreterState.appendUtf8Codepoint(allocator, buf, code);
+}
+
 const SYSTEMTIME = extern struct {
     wYear: u16,
     wMonth: u16,
@@ -870,14 +904,18 @@ fn execDlin(
 ) errors.EllochkaError!ExecResult {
     var semi: ?usize = null;
     for (args, 0..) |t, i| {
-        if (t.kind == .semicolon) { semi = i; break; }
+        if (t.kind == .semicolon) {
+            semi = i;
+            break;
+        }
     }
     const sep = semi orelse return errors.ParseError.InvalidStatement;
     const p_tokens = args[0..sep];
     const l_tokens = args[sep + 1 ..];
     const bytes = try resolveStringOperand(p_tokens, st);
     const letter = try singleLetterFromTokens(l_tokens);
-    st.scalars[letter] = @floatFromInt(bytes.len);
+
+    st.scalars[letter] = @floatFromInt(try InterpreterState.unicodeCodepointCount(bytes));
     return .next;
 }
 
@@ -893,6 +931,7 @@ fn execFind(
     const n_tokens = parts[3];
 
     const haystack = try resolveStringOperand(p_tokens, st);
+    const haystack_count = try InterpreterState.unicodeCodepointCount(haystack);
 
     var ip = expr_mod.Parser.init(allocator, i_tokens);
     const inode = try ip.parseExpr();
@@ -901,31 +940,45 @@ fn execFind(
     const start_pos: usize = @intFromFloat(ival);
 
     const n_letter = try singleLetterFromTokens(n_tokens);
-
     var found_pos: usize = 0;
-    const is_string_mode = s_tokens.len >= 1 and (s_tokens[0].kind == .string_literal or s_tokens[0].kind == .dollar);
 
-    if (start_pos == 0 or start_pos > haystack.len + 1) {
+    if (start_pos > haystack_count + 1) {
         st.scalars[n_letter] = 0.0;
         return .next;
     }
 
+    const start_byte = try unicodeByteOffset(haystack, start_pos);
+    const is_string_mode = s_tokens.len >= 1 and
+        (s_tokens[0].kind == .string_literal or s_tokens[0].kind == .dollar);
+
     if (is_string_mode) {
         const needle = try resolveStringOperand(s_tokens, st);
-        if (needle.len > 0 and start_pos - 1 <= haystack.len) {
-            const search_area = haystack[start_pos - 1 ..];
-            if (std.mem.indexOf(u8, search_area, needle)) |off| {
-                found_pos = start_pos + off;
+        _ = try InterpreterState.unicodeCodepointCount(needle);
+
+        if (needle.len > 0) {
+            const search_area = haystack[start_byte..];
+            if (std.mem.indexOf(u8, search_area, needle)) |offset| {
+                // Valid UTF-8 needles cannot start inside a continuation byte,
+                // therefore this byte search remains aligned to code points.
+                const prefix_count = try InterpreterState.unicodeCodepointCount(
+                    haystack[0 .. start_byte + offset],
+                );
+                found_pos = prefix_count + 1;
             }
         }
     } else {
         var sp = expr_mod.Parser.init(allocator, s_tokens);
         const snode = try sp.parseExpr();
         const sval = try expr_mod.evaluate(snode, st, .{});
-        const code: u8 = @intFromFloat(std.math.clamp(sval, 0.0, 255.0));
-        var j: usize = start_pos - 1;
-        while (j < haystack.len) : (j += 1) {
-            if (haystack[j] == code) { found_pos = j + 1; break; }
+        const wanted = try unicodeCodepointFromFloat(sval);
+
+        var position = start_pos;
+        while (position <= haystack_count) : (position += 1) {
+            const ch = try InterpreterState.utf8CharAt(haystack, position);
+            if (ch.codepoint == wanted) {
+                found_pos = position;
+                break;
+            }
         }
     }
 
@@ -1754,10 +1807,8 @@ fn execDollarStatement(
         var vp = expr_mod.Parser.init(allocator, toks[idx..]);
         const vnode = try vp.parseExpr();
         const val_f = try expr_mod.evaluate(vnode, st, .{});
-        const clamped = std.math.clamp(val_f, 0.0, 255.0);
-        const byte_val: u8 = @intFromFloat(clamped);
-
-        try st.writeCharCode(ch, char_index, byte_val);
+        const code = try unicodeCodepointFromFloat(val_f);
+        try st.writeUnicodeCodepoint(ch, char_index, code);
         return .next;
     }
 
@@ -1820,6 +1871,8 @@ fn appendStringComponent(
         if (eq(fname, "MID")) {
             const parts = try parseArgsInParens(3, seg[2..]);
             const p_bytes = try resolveStringOperand(parts[0], st);
+            const total_chars = try InterpreterState.unicodeCodepointCount(p_bytes);
+
             var ip = expr_mod.Parser.init(allocator, parts[1]);
             const inode = try ip.parseExpr();
             const ival = try expr_mod.evaluate(inode, st, .{});
@@ -1828,17 +1881,23 @@ fn appendStringComponent(
             const nval = try expr_mod.evaluate(nnode, st, .{});
 
             if (ival < 1) return errors.RuntimeError.IndexOutOfBounds;
-            const start_idx: usize = @intFromFloat(ival);
-            if (start_idx > p_bytes.len) return errors.RuntimeError.IndexOutOfBounds;
-            const count_i: i64 = @intFromFloat(nval);
-            const count: usize = if (count_i <= 0) 0 else @intCast(count_i);
-            const zig_start = start_idx - 1;
-            const zig_end = @min(p_bytes.len, zig_start + count);
-            buf.appendSlice(allocator, p_bytes[zig_start..zig_end]) catch return errors.RuntimeError.MemoryAllocationFailed;
+            const start_char: usize = @intFromFloat(ival);
+            if (start_char > total_chars) return errors.RuntimeError.IndexOutOfBounds;
+
+            const requested_i: i64 = @intFromFloat(nval);
+            if (requested_i <= 0) return;
+            const requested: usize = @intCast(requested_i);
+            const end_char = @min(total_chars, start_char + requested - 1);
+
+            const start_byte = try unicodeByteOffset(p_bytes, start_char);
+            const final_char = try InterpreterState.utf8CharAt(p_bytes, end_char);
+            buf.appendSlice(allocator, p_bytes[start_byte..final_char.end]) catch
+                return errors.RuntimeError.MemoryAllocationFailed;
             return;
         }
         if (eq(fname, "CHR")) {
             const parts = try parseArgsInParens(2, seg[2..]);
+
             var np = expr_mod.Parser.init(allocator, parts[0]);
             const nnode = try np.parseExpr();
             const nval = try expr_mod.evaluate(nnode, st, .{});
@@ -1846,13 +1905,14 @@ fn appendStringComponent(
             const snode = try sp.parseExpr();
             const sval = try expr_mod.evaluate(snode, st, .{});
 
-            const n_int: i64 = @intFromFloat(nval);
-            if (n_int <= 0) return;
-            const count: usize = @intCast(n_int);
-            const char_code: u8 = @intFromFloat(std.math.clamp(sval, 0.0, 255.0));
+            const repetitions_i: i64 = @intFromFloat(nval);
+            if (repetitions_i <= 0) return;
+            const repetitions: usize = @intCast(repetitions_i);
+            const code = try unicodeCodepointFromFloat(sval);
+
             var i: usize = 0;
-            while (i < count) : (i += 1) {
-                buf.append(allocator, char_code) catch return errors.RuntimeError.MemoryAllocationFailed;
+            while (i < repetitions) : (i += 1) {
+                try appendUnicodeCodepoint(allocator, buf, code);
             }
             return;
         }
@@ -2007,8 +2067,8 @@ fn execAssignment(
         if (idxf < 1) return errors.RuntimeError.IndexOutOfBounds;
         const char_index: usize = @intFromFloat(idxf);
         const bytes = try st.resolveStringBytes(ch);
-        if (char_index == 0 or char_index > bytes.len) return errors.RuntimeError.IndexOutOfBounds;
-        const val: f32 = @floatFromInt(bytes[char_index - 1]);
+        const character = try InterpreterState.utf8CharAt(bytes, char_index);
+        const val: f32 = @floatFromInt(character.codepoint);
         try storeAssignedValue(allocator, st, letter, is_array1d, is_array2d, index1_tokens, index2_tokens, val);
         return .next;
     }
@@ -2090,7 +2150,10 @@ fn writeToDollarTarget(st: *InterpreterState, ch: u8, value: []const u8) errors.
     }
 }
 
-const SortableString = struct { bytes: [state_mod.STATIC_STRING_LEN]u8, len: u8 };
+const SortableString = struct {
+    bytes: [state_mod.STATIC_STRING_LEN]u8,
+    len: u16,
+};
 
 fn insertionSortStrings(items: []SortableString, descending: bool) void {
     var i: usize = 1;
