@@ -5,9 +5,9 @@
 //! при равном приоритете, согласно спецификации):
 //!   expr    := term (("+" | "-") term)*
 //!   term    := factor (("*" | "/") factor)*
-//!   factor  := power ("^" power)*
-//!   power   := unary
-//!   unary   := "-"? primary
+//!   factor  := unary
+//!   power   := primary ("^" unary)*
+//!   unary   := ("-" | "+")? power
 //!   primary := number | variable | array_access | func_call
 //!            | "(" expr ")" | "@" | "?"
 //!
@@ -158,13 +158,7 @@ pub const Parser = struct {
     }
 
     fn parseFactor(self: *Parser) errors.ParseError!*ExprNode {
-        var lhs = try self.parseUnary();
-        while (self.peek().kind == .caret) {
-            _ = self.advance();
-            const rhs = try self.parseUnary();
-            lhs = try self.alloc(.{ .binary = .{ .op = '^', .lhs = lhs, .rhs = rhs } });
-        }
-        return lhs;
+        return self.parseUnary();
     }
 
     fn parseUnary(self: *Parser) errors.ParseError!*ExprNode {
@@ -177,7 +171,22 @@ pub const Parser = struct {
             _ = self.advance();
             return self.parseUnary();
         }
-        return self.parsePrimary();
+        return self.parsePower();
+    }
+
+    /// Уровень возведения в степень: примитив, затем цепочка `^`.
+    /// Вынесен отдельно от parseUnary, чтобы ведущий унарный минус
+    /// оборачивал ВЕСЬ результат степени: -2^2 = -(2^2) = -4,
+    /// как в оригинальном интерпретаторе, а не (-2)^2 = 4.
+    fn parsePower(self: *Parser) errors.ParseError!*ExprNode {
+        var lhs = try self.parsePrimary();
+        while (self.peek().kind == .caret) {
+            _ = self.advance();
+            // правая часть степени тоже может начинаться с минуса: 2^-2
+            const rhs = try self.parseUnary();
+            lhs = try self.alloc(.{ .binary = .{ .op = '^', .lhs = lhs, .rhs = rhs } });
+        }
+        return lhs;
     }
 
     fn parsePrimary(self: *Parser) errors.ParseError!*ExprNode {

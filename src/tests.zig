@@ -88,8 +88,10 @@ test "expr: скобки меняют порядок вычисления" {
 test "expr: унарный минус и степень" {
     var st = state_mod.InterpreterState.init(std.testing.allocator);
     defer st.deinit();
+    // Сверено с оригинальным интерпретатором в DOSBox: -2^2 = -(2^2) = -4,
+    // а не (-2)^2 = 4. Унарный минус связывает слабее возведения в степень.
     const v = try evalExpr("-2^2", &st);
-    try std.testing.expectApproxEqAbs(@as(f32, 4.0), v, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, -4.0), v, 0.0001);
 }
 
 test "expr: доступ к элементу массива после SIZE" {
@@ -234,4 +236,20 @@ test "esli: без совпадения метки после ; -> продол�
         .jump => |target| try std.testing.expectEqual(@as(usize, 2), target),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "expr: степень с отрицательным показателем" {
+    var st = state_mod.InterpreterState.init(std.testing.allocator);
+    defer st.deinit();
+    // 2^-2 = 0.25 - минус в показателе не должен ломаться patch'ем
+    const v = try evalExpr("2^-2", &st);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), v, 0.0001);
+}
+
+test "expr: явные скобки меняют приоритет унарного минуса" {
+    var st = state_mod.InterpreterState.init(std.testing.allocator);
+    defer st.deinit();
+    // (-2)^2 = 4 - явные скобки по-прежнему должны работать как обычно
+    const v = try evalExpr("(-2)^2", &st);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), v, 0.0001);
 }

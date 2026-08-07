@@ -1,0 +1,52 @@
+! ТЕСТ 1: арифметика, ESLI, GOTO, !nul/!one
+B=2+3*4
+LIST '--- Арифметика ---'
+LIST '2+3*4=';B;'  (ожидание 14)'
+B=(2+3)*4
+LIST '(2+3)*4=';B;'  (ожидание 20)'
+B=-2^2
+LIST '-2^2=';B;'  (ожидание 4)'
+A:-6.02e-2
+LIST 'A:-6.02e-2 -> A=';A;'  (ожидание -0.0602)'
+
+LIST '--- ESLI: == >> {} ---'
+A=5
+ESLI A == 5; @c1yes
+LIST 'A==5 -> FALSE  (ожидание TRUE)'
+GOTO @c1end
+@c1yes
+LIST 'A==5 -> TRUE  (ожидание TRUE)'
+@c1end
+
+ESLI A >> 10; @c2yes
+LIST 'A>>10 -> FALSE  (ожидание FALSE)'
+GOTO @c2end
+@c2yes
+LIST 'A>>10 -> TRUE  (ожидание FALSE)'
+@c2end
+
+ESLI A == {1,10} @c3yes
+LIST 'A=={1,10} -> FALSE  (ожидание TRUE)'
+GOTO @c3end
+@c3yes
+LIST 'A=={1,10} -> TRUE  (ожидание TRUE)'
+@c3end
+
+LIST '--- GOTO: цикл ---'
+A=1
+@loop
+LIST 'итерация ';A
+A=A+1
+ESLI A << 4; @loop
+
+LIST '--- Деление на ноль ---'
+!nul
+B=0/0
+LIST '0/0 при !nul=';B;'  (ожидание 0)'
+!one
+B=0/0
+LIST '0/0 при !one=';B;'  (ожидание 1)'
+!err
+
+LIST '--- Конец теста 1 ---'
+EXIT
