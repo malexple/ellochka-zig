@@ -2289,7 +2289,19 @@ fn execCvet(
     const r255 = (r * 255) / 63;
     const g255 = (g * 255) / 63;
     const b255 = (b * 255) / 63;
-    st.palette[@intCast(idx)] = (b255 << 16) | (g255 << 8) | r255;
+    const palette_index: usize = @intCast(idx);
+    const old_color = st.palette[palette_index];
+    const new_color = b255 << 16 | g255 << 8 | r255;
+
+    st.palette[palette_index] = new_color;
+
+    // DOS CVET меняет цвет уже нарисованных пикселей соответствующего
+    // палитрового индекса. Сейчас DIB хранит RGB, поэтому обновляем
+    // существующее изображение явно.
+    if (graphics.isInitialized()) {
+        graphics.replacePaletteColor(old_color, new_color);
+    }
+
     return .next;
 }
 

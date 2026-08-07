@@ -281,6 +281,40 @@ fn blitToWindow() void {
     _ = BitBlt(wdc, 0, 0, WIDTH, HEIGHT, mdc, 0, 0, SRCCOPY);
 }
 
+/// Заменяет все уже нарисованные пиксели старого палитрового цвета.
+/// Нужна для DOS-семантики CVET: изменение палитры меняет вид
+/// существующих пикселей, нарисованных этим цветом.
+pub fn replacePaletteColor(old_color: COLORREF, new_color: COLORREF) void {
+    if (old_color == new_color) return;
+
+    const bits = g_bits orelse return;
+
+    // COLORREF = 0x00BBGGRR, а 24-bit DIB хранит байты B,G,R.
+    const old_r: u8 = @truncate(old_color);
+    const old_g: u8 = @truncate(old_color >> 8);
+    const old_b: u8 = @truncate(old_color >> 16);
+
+    const new_r: u8 = @truncate(new_color);
+    const new_g: u8 = @truncate(new_color >> 8);
+    const new_b: u8 = @truncate(new_color >> 16);
+
+    const image_bytes = ROW_STRIDE * @as(usize, @intCast(HEIGHT));
+
+    var offset: usize = 0;
+    while (offset < image_bytes) : (offset += 3) {
+        if (bits[offset] == old_b and
+            bits[offset + 1] == old_g and
+            bits[offset + 2] == old_r)
+            {
+                bits[offset] = new_b;
+                bits[offset + 1] = new_g;
+                bits[offset + 2] = new_r;
+            }
+    }
+
+    blitToWindow();
+}
+
 pub fn setPixel(x: i32, y: i32, color: COLORREF) void {
     const dc = g_mem_dc orelse return;
     _ = SetPixelV(dc, x, y, color);
