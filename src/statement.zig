@@ -1327,12 +1327,14 @@ fn execList(
     st: *InterpreterState,
     stdout: anytype,
 ) errors.EllochkaError!ExecResult {
-   if (st.graphics_mode) return execGraphicsList(allocator, args, st);
+    if (st.graphics_mode) return execGraphicsList(allocator, args, st);
 
-    var newline = true;
+    // В канонической Эллочке завершающий '\\' означает явный переход
+    // на следующую строку. Без него следующий LIST продолжает строку.
+    var newline = false;
     var effective_args = args;
     if (args.len > 0 and args[args.len - 1].kind == .backslash) {
-        newline = false;
+        newline = true;
         effective_args = args[0 .. args.len - 1];
     }
 
@@ -1348,6 +1350,7 @@ fn execList(
         }
         i += 1;
     }
+
     if (newline) stdout.print("\n", .{}) catch {};
     return .next;
 }
@@ -1387,14 +1390,18 @@ fn execGraphicsList(
     args: []lexer.Token,
     st: *InterpreterState,
 ) errors.EllochkaError!ExecResult {
-    var newline = true;
+    // В канонической Эллочке завершающий '\\' означает явный переход
+    // на следующую строку. Без него следующий LIST продолжает строку.
+    var newline = false;
     var effective_args = args;
     if (args.len > 0 and args[args.len - 1].kind == .backslash) {
-        newline = false;
+        newline = true;
         effective_args = args[0 .. args.len - 1];
     }
 
     var output: std.ArrayListUnmanaged(u8) = .{};
+    defer output.deinit(allocator);
+
     var start: usize = 0;
     var index: usize = 0;
     while (index <= effective_args.len) : (index += 1) {
@@ -1425,8 +1432,8 @@ fn execGraphicsList(
             st.text_row = graphics.TEXT_ROWS;
         }
     } else {
-        // Keep the logical cursor beyond the right border. Subsequent LIST
-        // calls ending in '\\' remain clipped until STLB or a newline resets it.
+        // Сохраняем логическую позицию за правой границей до STLB либо
+        // до явного перевода строки через завершающий '\\'.
         st.text_col += logical_cells;
     }
 
@@ -2916,6 +2923,7 @@ fn execKrug(
 ) errors.EllochkaError!ExecResult {
     try requireGraphics();
     const parts = try splitBySemicolon(4, args);
+
     var xp = expr_mod.Parser.init(allocator, parts[0]);
     const xv = try expr_mod.evaluate(try xp.parseExpr(), st, .{});
     var yp = expr_mod.Parser.init(allocator, parts[1]);
@@ -2925,11 +2933,29 @@ fn execKrug(
     var ap = expr_mod.Parser.init(allocator, parts[3]);
     const av = try expr_mod.evaluate(try ap.parseExpr(), st, .{});
 
-    const cx: i32 = @intFromFloat(xv);
-    const cy = flipY(st, yv);
-    const rx: i32 = @intFromFloat(rv);
-    const ry: i32 = @intFromFloat(rv * av);
-    graphics.drawEllipse(cx, cy, rx, ry, currentColorRef(st));
+    const radius = @abs(rv);
+    const ratio = @abs(av);
+
+    // A — отношение полуосей, а не неограниченный множитель R.
+    // При A<=1 сжимается вертикальная полуось; при A>1 — горизонтальная.
+    // Поэтому обе полуоси всегда находятся в диапазоне 0..R.
+    var rx: f32 = radius;
+    var ry: f32 = radius;
+    if (ratio > 1.0) {
+        rx = radius / ratio;
+    } else if (ratio > 0.0) {
+        ry = radius * ratio;
+    } else {
+        ry = 0.0;
+    }
+
+    graphics.drawEllipse(
+        @intFromFloat(xv),
+        flipY(st, yv),
+        @intFromFloat(rx),
+        @intFromFloat(ry),
+        currentColorRef(st),
+    );
     return .next;
 }
 
