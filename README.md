@@ -32,14 +32,14 @@ ellochka.exe examples\sample_author.ell
 ellochka.exe examples\snake.ell
 ```
 
-![img.png](.assets/img.png)
+![snake.png](.assets/snake.png)
 
 ### Запуск игры змейка на языке Эллочка в графическом режиме
 
 ```bash
 ellochka.exe examples\snake_graphics.ell
 ```
-![img.png](img.png)
+![img.png](.assets/snake_graphics.png)
 
 ## Графический режим
 
